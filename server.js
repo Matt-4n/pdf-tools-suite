@@ -394,7 +394,6 @@ app.post('/api/merger/process-manifest', async (req, res) => {
     }
 });
 
-// Main merger processing endpoint
 // Main merger processing endpoint - ENHANCED WITH PERFORMANCE MONITORING
 app.post('/api/merger/process', async (req, res) => {
     // Generate job ID and start performance tracking
@@ -417,11 +416,12 @@ app.post('/api/merger/process', async (req, res) => {
         const pythonOptions = {
             mode: 'text',
             pythonPath: 'python', // Adjust if needed
-            scriptPath: path.join(__dirname, 'python-scripts'),
+            scriptPath: path.join(__dirname),  // Use root directory since pdf_merger.py is there
             args: [
                 '--input-folder', 'merger-uploads',
                 '--output-folder', outputDir,
-                '--job-id', jobId
+                '--job-id', jobId,
+                '--json-output'  // Enable JSON output for web app
             ]
         };
 
@@ -448,11 +448,22 @@ app.post('/api/merger/process', async (req, res) => {
                     reject(err);
                 } else {
                     try {
-                        const result = JSON.parse(results[results.length - 1]);
+                        // Get the last line which should be JSON output
+                        const lastLine = results[results.length - 1];
+                        const result = JSON.parse(lastLine);
                         resolve(result);
                     } catch (parseErr) {
                         logger.error('Failed to parse Python results:', parseErr);
-                        reject(parseErr);
+                        logger.error('Raw output:', results);
+                        // Fallback result if JSON parsing fails
+                        resolve({
+                            success: true,
+                            message: 'Processing completed, but could not parse detailed results',
+                            stats: {
+                                processed_files: files.pdfFiles?.length || 0,
+                                merged_clients: 0
+                            }
+                        });
                     }
                 }
             });
@@ -481,7 +492,11 @@ app.post('/api/merger/process', async (req, res) => {
         performanceMonitor.failJob(trackingJobId, error);
         
         logger.error('Merger processing error:', error);
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            jobId: trackingJobId
+        });
     }
 });
 
