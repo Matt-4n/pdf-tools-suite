@@ -1,3 +1,237 @@
+# Add this import at the top of your pdf_merger.py file
+from pdf_optimizer import PDFOptimizer
+
+# Add this to your PDFMerger __init__ method
+def __init__(self, input_folder, output_folder, reference_doc=None, edi_file=None, 
+             enable_optimization=True, target_size_mb=1.2):
+    # Your existing initialization code...
+    
+    # Add these lines for optimization
+    self.enable_optimization = enable_optimization
+    self.target_size_mb = target_size_mb
+    
+    if self.enable_optimization:
+        self.optimizer = PDFOptimizer(target_size_mb=target_size_mb, quality=85)
+        self.logger.info(f"PDF optimization enabled (target: {target_size_mb}MB)")
+        
+        # Initialize optimization statistics
+        self.optimization_stats = {
+            'files_optimized': 0,
+            'total_savings_mb': 0,
+            'average_compression_ratio': 0
+        }
+
+# Update your merge_client_documents method to include optimization
+def merge_client_documents(self, client_key, client_data):
+    """Merge all documents for a specific client with optimization"""
+    consignee_ref, full_name = client_data['info']
+    if not consignee_ref:
+        self.logger.error(f"Missing consignee reference for {client_key}")
+        return False
+    
+    # If no name, create a default one
+    if not full_name:
+        full_name = f"Client_{consignee_ref.replace('/', '_')}"
+    
+    self.logger.info(f"Merging documents for: {consignee_ref} - {full_name}")
+    
+    # Group pages by document type
+    advice_pages = []
+    bill_pages = []
+    customer_pages = []
+    
+    for page_info in client_data['pages']:
+        if page_info['doc_type'] == 'Advice of Arrivals':
+            advice_pages.append(page_info)
+        elif page_info['doc_type'] == 'Bill of Lading':
+            bill_pages.append(page_info)
+        elif page_info['doc_type'] == 'Customer Document':
+            customer_pages.append(page_info)
+    
+    self.logger.info(f"Found: {len(advice_pages)} Advice pages, {len(bill_pages)} Bill pages, {len(customer_pages)} Customer pages")
+    
+    # Create merged PDF in correct order: Advice → Bills → Customer
+    merged_doc = fitz.open()  # Create new empty document
+    
+    # Add pages in order
+    for page_info in advice_pages:
+        source_doc = page_info['doc_obj']
+        page_num = page_info['page_num']
+        merged_doc.insert_pdf(source_doc, from_page=page_num, to_page=page_num)
+    
+    for page_info in bill_pages:
+        source_doc = page_info['doc_obj']
+        page_num = page_info['page_num']
+        merged_doc.insert_pdf(source_doc, from_page=page_num, to_page=page_num)
+    
+    for page_info in customer_pages:
+        source_doc = page_info['doc_obj']
+        page_num = page_info['page_num']
+        merged_doc.insert_pdf(source_doc, from_page=page_num, to_page=page_num)
+    
+    # Save merged document
+    safe_ref = consignee_ref.replace('/', '-')
+    safe_name = re.sub(r'[^\w\s-]', '', full_name).strip()
+    
+    output_filename = f"{safe_name}_{safe_ref}.pdf"
+    output_path = self.output_folder / output_filename
+    
+    # Save initial merged document
+    merged_doc.save(str(output_path))
+    merged_doc.close()
+    
+    total_pages = len(advice_pages) + len(bill_pages) + len(customer_pages)
+    self.logger.info(f"✅ Merged: {output_filename} ({total_pages} pages)")
+    
+    # Apply optimization if enabled
+    if self.enable_optimization:
+        try:
+            self.logger.info(f"🗜️ Optimizing: {output_filename}")
+            optimization_result = self.optimizer.optimize_pdf(output_path)
+            
+            if optimization_result['optimized']:
+                self.logger.info(f"   Optimized: {optimization_result['original_size_mb']:.2f}MB → "
+                              f"{optimization_result['final_size_mb']:.2f}MB "
+                              f"(saved {optimization_result['savings_mb']:.2f}MB)")
+                
+                # Update optimization statistics
+                self.optimization_stats['files_optimized'] += 1
+                self.optimization_stats['total_savings_mb'] += optimization_result['savings_mb']
+                
+                # Update average compression ratio
+                files_count = self.optimization_stats['files_optimized']
+                current_avg = self.optimization_stats['average_compression_ratio']
+                new_ratio = optimization_result['compression_ratio']
+                self.optimization_stats['average_compression_ratio'] = (
+                    (current_avg * (files_count - 1) + new_ratio) / files_count
+                )
+            else:
+                self.logger.info(f"   No optimization needed: {optimization_result['reason']}")
+                
+        except Exception as e:
+            self.logger.warning(f"   ⚠️ Optimization failed: {str(e)}")
+    
+    return True
+
+# Update your command line arguments to include optimization options
+def parse_command_line():
+    """Parse command line arguments - with optimization options"""
+    parser = argparse.ArgumentParser(description='PDF Merger - Merge shipping documents by client')
+    
+    # Required arguments
+    parser.add_argument('--input-folder', required=True,
+                       help='Folder containing PDF files to merge')
+    parser.add_argument('--output-folder', required=True,
+                       help='Folder to save merged PDF files')
+    
+    # Optional arguments for manifest
+    parser.add_argument('--edi-file',
+                       help='EDI Excel file (.xls or .xlsx) for client manifest')
+    parser.add_argument('--reference-doc',
+                       help='Reference PDF document to extract client manifest')
+    parser.add_argument('--manifest-file',
+                       help='Existing CSV manifest file')
+    
+    # Optimization options
+    parser.add_argument('--enable-optimization', action='store_true', default=True,
+                       help='Enable PDF optimization (default: enabled)')
+    parser.add_argument('--disable-optimization', action='store_true',
+                       help='Disable PDF optimization')
+    parser.add_argument('--target-size', type=float, default=1.2,
+                       help='Target file size in MB (default: 1.2)')
+    parser.add_argument('--quality', type=int, default=85,
+                       help='Image quality 0-100 (default: 85)')
+    
+    # Optional settings
+    parser.add_argument('--job-id',
+                       help='Job ID for web application processing')
+    parser.add_argument('--json-output', action='store_true',
+                       help='Output results as JSON (for web application)')
+    
+    return parser.parse_args()
+
+# Update your main section to handle optimization arguments
+if __name__ == "__main__":
+    # Parse command line arguments
+    args = parse_command_line()
+    
+    # Set up logging FIRST
+    logger = setup_logging(args.job_id)
+    
+    # Check if input folder exists
+    if not Path(args.input_folder).exists():
+        logger.error(f"Input folder does not exist: {args.input_folder}")
+        print(f"❌ Error: Input folder does not exist: {args.input_folder}")
+        sys.exit(1)
+    
+    # Determine optimization settings
+    enable_optimization = args.enable_optimization and not args.disable_optimization
+    
+    # Create PDF merger with command line arguments
+    try:
+        logger.info("Creating PDF merger instance")
+        pdf_merger = PDFMerger(
+            input_folder=args.input_folder,
+            output_folder=args.output_folder,
+            edi_file=args.edi_file,
+            reference_doc=args.reference_doc,
+            enable_optimization=enable_optimization,
+            target_size_mb=args.target_size
+        )
+        
+        # Load manifest file if specified
+        if args.manifest_file:
+            logger.info(f"Loading manifest file: {args.manifest_file}")
+            pdf_merger.load_manifest(args.manifest_file)
+        
+        # Process documents
+        logger.info("Starting document processing")
+        pdf_merger.process_all_documents()
+        
+        # Get final statistics
+        total_clients = len(pdf_merger.clients)
+        
+        # Include optimization stats in output
+        result_stats = {
+            'processed_files': getattr(pdf_merger, 'processed_files', 0),
+            'merged_clients': total_clients,
+            'optimization': pdf_merger.optimization_stats if enable_optimization else None
+        }
+        
+        # Simple success message
+        if args.json_output:
+            import json
+            result = {
+                'success': True,
+                'message': 'Processing completed successfully',
+                'output_folder': args.output_folder,
+                'stats': result_stats
+            }
+            print(json.dumps(result))
+        else:
+            print(f"\n✅ Processing complete! Check the '{args.output_folder}' folder for merged PDFs.")
+            
+            if enable_optimization:
+                opt_stats = pdf_merger.optimization_stats
+                print(f"🗜️ Optimization Summary:")
+                print(f"   Files optimized: {opt_stats['files_optimized']}")
+                print(f"   Total space saved: {opt_stats['total_savings_mb']:.2f} MB")
+                if opt_stats['files_optimized'] > 0:
+                    print(f"   Average compression: {opt_stats['average_compression_ratio']:.2f}x")
+            
+        logger.info("=== PDF Merger Completed Successfully ===")
+    
+    except Exception as e:
+        error_msg = f"Processing failed: {str(e)}"
+        logger.error(error_msg)
+        logger.error("=== PDF Merger Failed ===")
+        
+        if args.json_output:
+            import json
+            print(json.dumps({'success': False, 'error': error_msg}))
+        else:
+            print(f"❌ {error_msg}")
+        sys.exit(1)
 import logging
 from datetime import datetime
 import os
