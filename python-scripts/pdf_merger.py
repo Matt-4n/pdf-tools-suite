@@ -1,3 +1,5 @@
+import logging
+from datetime import datetime
 import os
 import re
 import fitz  # PyMuPDF
@@ -16,8 +18,45 @@ except ImportError:
     except ImportError:
         EXCEL_AVAILABLE = False
 
+def setup_logging(job_id=None):
+    """Set up simple logging for PDF merger"""
+    
+    # Create logs directory if it doesn't exist
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    # Create log filename with timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    if job_id:
+        log_filename = f"merger_{job_id}_{timestamp}.log"
+    else:
+        log_filename = f"pdf_merger_{timestamp}.log"
+    
+    # Set up logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            # Log to file
+            logging.FileHandler(log_dir / log_filename, encoding='utf-8'),
+            # Also show on screen (console)
+            logging.StreamHandler()
+        ]
+    )
+    
+    # Return logger
+    logger = logging.getLogger('PDFMerger')
+    logger.info("=== PDF Merger Started ===")
+    logger.info(f"Log file: {log_filename}")
+    
+    return logger
+    
 class PDFMerger:
     def __init__(self, input_folder, output_folder, reference_doc=None, edi_file=None):
+    # Add these two lines at the start
+    self.logger = logging.getLogger('PDFMerger')
+    self.logger.info(f"Initializing PDF Merger: {input_folder} -> {output_folder}")
+    # ... rest of your existing __init__ code stays the same
         self.input_folder = Path(input_folder)
         self.output_folder = Path(output_folder)
         self.output_folder.mkdir(exist_ok=True)
@@ -554,7 +593,9 @@ class PDFMerger:
             print("No PDF files found!")
             return
         
-        print(f"Found {len(pdf_files)} PDF files to process")
+        # OLD: print(f"Found {len(pdf_files)} PDF files to process")
+        # NEW:
+        self.logger.info(f"Found {len(pdf_files)} PDF files to process")
         
         opened_docs = []  # Keep track of opened documents
         
@@ -578,7 +619,9 @@ class PDFMerger:
         
         # Now merge documents for each client
         print(f"\n{'='*60}")
-        print(f"MERGING DOCUMENTS FOR {len(self.clients)} CLIENTS")
+        # OLD: print(f"MERGING DOCUMENTS FOR {len(self.clients)} CLIENTS")
+        # NEW:  
+        self.logger.info(f"MERGING DOCUMENTS FOR {len(self.clients)} CLIENTS")
         print(f"{'='*60}")
         
         for client_key, client_data in self.clients.items():
@@ -588,7 +631,9 @@ class PDFMerger:
         for doc in opened_docs:
             doc.close()
         
-        print(f"\n✅ Process complete! Check the '{self.output_folder.name}' folder for merged PDFs.")
+        # OLD: print(f"✅ Process complete! Check the '{self.output_folder.name}' folder for merged PDFs.")
+        # NEW:
+        self.logger.info(f"✅ Process complete! Check the '{self.output_folder.name}' folder for merged PDFs.")
 
 # Example usage
 if __name__ == "__main__":
