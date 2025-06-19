@@ -1,5 +1,4 @@
 const { performance } = require('perf_hooks');
-const fs = require('fs-extra');
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
@@ -17,10 +16,16 @@ const XLSX = require('xlsx');
 const csv = require('csv-parser');
 const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 
+// Import your text overlay processor
+const TextOverlayProcessor = require('./textOverlay.js');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Simple Performance Monitor Class
+// Constants
+const SIGNATURE_PATH = './signatures/default-signature.png';
+
+// Simple Performance Monitor Class (keeping your existing implementation)
 class SimplePerformanceMonitor {
     constructor() {
         this.metrics = {
@@ -38,7 +43,6 @@ class SimplePerformanceMonitor {
         this.activeJobs = new Map();
     }
     
-    // Start tracking a job
     startJob(jobType, jobId, details = {}) {
         const job = {
             type: jobType,
@@ -54,7 +58,6 @@ class SimplePerformanceMonitor {
         return job;
     }
     
-    // Complete a job successfully
     completeJob(jobId, result = {}) {
         const job = this.activeJobs.get(jobId);
         if (!job) return null;
@@ -64,7 +67,6 @@ class SimplePerformanceMonitor {
         job.status = 'completed';
         job.result = result;
         
-        // Update metrics
         this.metrics.totalRequests++;
         this.metrics.successfulRequests++;
         this.metrics.totalProcessingTime += duration;
@@ -82,7 +84,6 @@ class SimplePerformanceMonitor {
         return job;
     }
     
-    // Mark a job as failed
     failJob(jobId, error) {
         const job = this.activeJobs.get(jobId);
         if (!job) return null;
@@ -92,11 +93,9 @@ class SimplePerformanceMonitor {
         job.status = 'failed';
         job.error = error.message || error;
         
-        // Update metrics
         this.metrics.totalRequests++;
         this.metrics.failedRequests++;
         
-        // Keep track of recent errors (last 50)
         this.metrics.errors.push({
             jobId,
             type: job.type,
@@ -114,7 +113,6 @@ class SimplePerformanceMonitor {
         return job;
     }
     
-    // Get current metrics
     getMetrics() {
         const uptime = Date.now() - this.metrics.startTime;
         const successRate = this.metrics.totalRequests > 0 ? 
@@ -130,11 +128,10 @@ class SimplePerformanceMonitor {
         };
     }
     
-    // Get health status
     getHealthStatus() {
         const metrics = this.getMetrics();
         const recentErrors = this.metrics.errors.filter(
-            error => Date.now() - new Date(error.timestamp).getTime() < 60000 // Last minute
+            error => Date.now() - new Date(error.timestamp).getTime() < 60000
         );
         
         const isHealthy = recentErrors.length === 0 && parseFloat(metrics.successRate) > 95;
@@ -172,7 +169,7 @@ const logger = winston.createLogger({
 
 // Security and performance middleware
 app.use(helmet({
-    contentSecurityPolicy: false // Allow inline scripts for our app
+    contentSecurityPolicy: false
 }));
 app.use(compression());
 app.use(cors());
@@ -181,8 +178,8 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Rate limiting
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100 // limit each IP to 100 requests per windowMs
+    windowMs: 15 * 60 * 1000,
+    max: 100
 });
 app.use('/api/', limiter);
 
@@ -195,6 +192,18 @@ const ensureDirectories = async () => {
     
     for (const dir of dirs) {
         await fs.ensureDir(dir);
+    }
+};
+
+// Check signature file
+const ensureSignature = async () => {
+    if (!await fs.pathExists(SIGNATURE_PATH)) {
+        logger.warn(`⚠️  Default signature not found at: ${SIGNATURE_PATH}`);
+        console.log('📝 Place your signature image at:', SIGNATURE_PATH);
+        console.log('💡 Supported formats: PNG, JPG, GIF');
+    } else {
+        logger.info('✅ Default signature loaded');
+        console.log('✅ Default signature found');
     }
 };
 
@@ -214,11 +223,11 @@ const createMulterStorage = (destination) => {
             fileSize: 100 * 1024 * 1024 // 100MB limit
         },
         fileFilter: (req, file, cb) => {
-            const allowedTypes = /\.(pdf|xls|xlsx)$/i;
+            const allowedTypes = /\.(pdf|xls|xlsx|png|jpg|jpeg|gif)$/i;
             if (allowedTypes.test(file.originalname)) {
                 cb(null, true);
             } else {
-                cb(new Error('Only PDF, XLS, and XLSX files are allowed'));
+                cb(new Error('Only PDF, Excel, and image files are allowed'));
             }
         }
     });
@@ -230,9 +239,9 @@ const uploadMerger = createMulterStorage('merger-uploads');
 // Serve static files
 app.use(express.static('public'));
 
-// ==================== EXISTING FORM PROCESSOR ROUTES ====================
+// ==================== FORM PROCESSOR ROUTES ====================
 
-// Your existing form processor upload endpoint
+// Form processor upload endpoint
 app.post('/api/upload', uploadProcessor.array('files'), async (req, res) => {
     try {
         logger.info(`Form processor upload: ${req.files.length} files`);
@@ -245,9 +254,13 @@ app.post('/api/upload', uploadProcessor.array('files'), async (req, res) => {
             size: file.size
         }));
 
+        // Check if signature exists
+        const signatureExists = await fs.pathExists(SIGNATURE_PATH);
+
         res.json({
             success: true,
             files: processedFiles,
+            signatureAvailable: signatureExists,
             message: `Uploaded ${req.files.length} files successfully`
         });
     } catch (error) {
@@ -256,44 +269,91 @@ app.post('/api/upload', uploadProcessor.array('files'), async (req, res) => {
     }
 });
 
-// Your existing form processor process endpoint
+// Form processor process endpoint - NOW PROPERLY INTEGRATED
 app.post('/api/process', async (req, res) => {
+    const trackingJobId = `form_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const job = performanceMonitor.startJob('form-processor', trackingJobId, {
+        fileCount: req.body.files?.length || 0,
+        overlays: req.body.overlays?.length || 0
+    });
+
     try {
         const { files, overlays, settings } = req.body;
         logger.info(`Processing ${files.length} files with form overlay`);
 
-        // Your existing form processing logic would go here
-        // This is a placeholder for your textOverlay.js functionality
-        
         const jobId = uuidv4();
         const outputDir = path.join('outputs', jobId);
         await fs.ensureDir(outputDir);
 
-        // Simulate processing (replace with your actual logic)
+        // Initialize the text overlay processor
+        const processor = new TextOverlayProcessor();
+        
+        // Configure overlays if provided
+        if (overlays && overlays.length > 0) {
+            // Convert frontend overlay format to processor format
+            const overlayConfig = overlays.map(overlay => ({
+                name: overlay.name || 'customOverlay',
+                x: overlay.x || 100,
+                y: overlay.y || 100,
+                text: overlay.text || '',
+                description: overlay.description || 'Custom overlay'
+            }));
+            
+            // Update processor overlay configuration
+            processor.overlayConfig.fields = overlayConfig;
+        }
+
+        // Copy uploaded files to a temporary processing directory
+        const tempInputDir = path.join('uploads', 'temp_' + jobId);
+        await fs.ensureDir(tempInputDir);
+
         const processedFiles = [];
         for (const file of files) {
-            // Your existing PDF processing logic
-            processedFiles.push({
-                originalName: file.originalName,
-                processedName: `processed_${file.originalName}`,
-                path: path.join(outputDir, `processed_${file.originalName}`)
-            });
+            const originalPath = path.join('uploads', file.filename || file.originalName);
+            const tempPath = path.join(tempInputDir, file.originalName);
+            
+            if (await fs.pathExists(originalPath)) {
+                await fs.copy(originalPath, tempPath);
+                processedFiles.push({
+                    originalName: file.originalName,
+                    tempPath: tempPath
+                });
+            }
         }
+
+        // Process the PDFs using your existing textOverlay processor
+        const result = await processor.processBatch(tempInputDir, outputDir);
+
+        // Clean up temporary directory
+        await fs.remove(tempInputDir);
+
+        // Complete the performance tracking
+        const completedJob = performanceMonitor.completeJob(trackingJobId, result);
 
         res.json({
             success: true,
             jobId: jobId,
-            processedFiles: processedFiles,
-            downloadUrl: `/api/download/${jobId}`
+            processedFiles: result.successFiles || processedFiles,
+            downloadUrl: `/api/download/${jobId}`,
+            performance: {
+                duration: completedJob.duration,
+                filesPerSecond: (result.successful || 0) / (completedJob.duration / 1000)
+            },
+            stats: {
+                processed: result.processed || 0,
+                successful: result.successful || 0,
+                failed: result.failed || 0
+            }
         });
 
     } catch (error) {
-        logger.error('Processing error:', error);
+        performanceMonitor.failJob(trackingJobId, error);
+        logger.error('Form processing error:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// ==================== NEW PDF MERGER ROUTES ====================
+// ==================== DOCUMENT MERGER ROUTES ====================
 
 // Upload files for merger
 app.post('/api/merger/upload', uploadMerger.fields([
@@ -310,7 +370,6 @@ app.post('/api/merger/upload', uploadMerger.fields([
             referenceDoc: null
         };
 
-        // Process PDF files
         if (req.files.pdfFiles) {
             uploadedFiles.pdfFiles = req.files.pdfFiles.map(file => ({
                 id: uuidv4(),
@@ -321,7 +380,6 @@ app.post('/api/merger/upload', uploadMerger.fields([
             }));
         }
 
-        // Process EDI file
         if (req.files.ediFile && req.files.ediFile[0]) {
             const file = req.files.ediFile[0];
             uploadedFiles.ediFile = {
@@ -333,7 +391,6 @@ app.post('/api/merger/upload', uploadMerger.fields([
             };
         }
 
-        // Process reference document
         if (req.files.referenceDoc && req.files.referenceDoc[0]) {
             const file = req.files.referenceDoc[0];
             uploadedFiles.referenceDoc = {
@@ -367,15 +424,12 @@ app.post('/api/merger/process-manifest', async (req, res) => {
 
         let manifest = {};
 
-        // Process EDI file if provided
         if (ediFilePath && await fs.pathExists(ediFilePath)) {
             manifest = await processEdiFile(ediFilePath);
         } else if (referenceDocPath && await fs.pathExists(referenceDocPath)) {
-            // For reference docs, you'd call your Python script
             manifest = await processReferenceDocument(referenceDocPath);
         }
 
-        // Save manifest as CSV
         const manifestId = uuidv4();
         const manifestPath = path.join('manifests', `manifest_${manifestId}.csv`);
         await saveManifestAsCsv(manifest, manifestPath);
@@ -394,9 +448,8 @@ app.post('/api/merger/process-manifest', async (req, res) => {
     }
 });
 
-// Main merger processing endpoint - ENHANCED WITH PERFORMANCE MONITORING
+// Main merger processing endpoint
 app.post('/api/merger/process', async (req, res) => {
-    // Generate job ID and start performance tracking
     const trackingJobId = `merger_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const job = performanceMonitor.startJob('merger', trackingJobId, {
         fileCount: req.body.files?.pdfFiles?.length || 0,
@@ -412,25 +465,22 @@ app.post('/api/merger/process', async (req, res) => {
         const outputDir = path.join('merger-outputs', jobId);
         await fs.ensureDir(outputDir);
 
-        // Prepare Python script arguments
         const pythonOptions = {
             mode: 'text',
-            pythonPath: 'python', // Adjust if needed
-            scriptPath: path.join(__dirname),  // Use root directory since pdf_merger.py is there
+            pythonPath: 'python',
+            scriptPath: path.join(__dirname, 'python-scripts'),
             args: [
                 '--input-folder', 'merger-uploads',
                 '--output-folder', outputDir,
                 '--job-id', jobId,
-                '--json-output'  // Enable JSON output for web app
+                '--json-output'
             ]
         };
 
-        // Add manifest if available
         if (manifestPath && await fs.pathExists(manifestPath)) {
             pythonOptions.args.push('--manifest-file', manifestPath);
         }
 
-        // Add settings
         if (settings) {
             if (settings.namingFormat) {
                 pythonOptions.args.push('--naming-format', settings.namingFormat);
@@ -440,7 +490,6 @@ app.post('/api/merger/process', async (req, res) => {
             }
         }
 
-        // Execute Python merger script
         const results = await new Promise((resolve, reject) => {
             PythonShell.run('pdf_merger.py', pythonOptions, (err, results) => {
                 if (err) {
@@ -448,14 +497,11 @@ app.post('/api/merger/process', async (req, res) => {
                     reject(err);
                 } else {
                     try {
-                        // Get the last line which should be JSON output
                         const lastLine = results[results.length - 1];
                         const result = JSON.parse(lastLine);
                         resolve(result);
                     } catch (parseErr) {
                         logger.error('Failed to parse Python results:', parseErr);
-                        logger.error('Raw output:', results);
-                        // Fallback result if JSON parsing fails
                         resolve({
                             success: true,
                             message: 'Processing completed, but could not parse detailed results',
@@ -469,13 +515,11 @@ app.post('/api/merger/process', async (req, res) => {
             });
         });
 
-        // Add job info to results
         results.jobId = jobId;
         results.downloadUrl = `/api/merger/download/${jobId}`;
 
         logger.info(`Merger processing completed for job ${jobId}`);
 
-        // Complete the performance tracking job successfully
         const completedJob = performanceMonitor.completeJob(trackingJobId, results);
         
         res.json({
@@ -488,65 +532,13 @@ app.post('/api/merger/process', async (req, res) => {
         });
 
     } catch (error) {
-        // Mark the performance tracking job as failed
         performanceMonitor.failJob(trackingJobId, error);
-        
         logger.error('Merger processing error:', error);
         res.status(500).json({ 
             success: false, 
             error: error.message,
             jobId: trackingJobId
         });
-    }
-});
-
-        // Add manifest if available
-        if (manifestPath && await fs.pathExists(manifestPath)) {
-            pythonOptions.args.push('--manifest-file', manifestPath);
-        }
-
-        // Add settings
-        if (settings) {
-            if (settings.namingFormat) {
-                pythonOptions.args.push('--naming-format', settings.namingFormat);
-            }
-            if (settings.pageOrder) {
-                pythonOptions.args.push('--page-order', settings.pageOrder);
-            }
-        }
-
-        // Execute Python merger script
-        const results = await new Promise((resolve, reject) => {
-            PythonShell.run('pdf_merger.py', pythonOptions, (err, results) => {
-                if (err) {
-                    logger.error('Python script error:', err);
-                    reject(err);
-                } else {
-                    try {
-                        const result = JSON.parse(results[results.length - 1]);
-                        resolve(result);
-                    } catch (parseErr) {
-                        logger.error('Failed to parse Python results:', parseErr);
-                        reject(parseErr);
-                    }
-                }
-            });
-        });
-
-        // Add job info to results
-        results.jobId = jobId;
-        results.downloadUrl = `/api/merger/download/${jobId}`;
-
-        logger.info(`Merger processing completed for job ${jobId}`);
-
-        res.json({
-            success: true,
-            ...results
-        });
-
-    } catch (error) {
-        logger.error('Merger processing error:', error);
-        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -566,7 +558,6 @@ app.get('/api/merger/download/:jobId', async (req, res) => {
 
         archive.pipe(output);
 
-        // Add all PDF files from the output directory
         const files = await fs.readdir(outputDir);
         const pdfFiles = files.filter(file => file.endsWith('.pdf'));
 
@@ -576,15 +567,12 @@ app.get('/api/merger/download/:jobId', async (req, res) => {
         }
 
         await archive.finalize();
-
-        // Wait for the zip to be created
         await new Promise((resolve) => output.on('close', resolve));
 
         res.download(zipPath, `merged_documents_${jobId}.zip`, (err) => {
             if (err) {
                 logger.error('Download error:', err);
             }
-            // Clean up zip file after download
             fs.remove(zipPath).catch(console.error);
         });
 
@@ -593,15 +581,44 @@ app.get('/api/merger/download/:jobId', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-// Download merged files
-app.get('/api/merger/download/:jobId', async (req, res) => {
-    // ... your existing download code stays here
+
+// ==================== SHARED ROUTES ====================
+
+// Download processed files
+app.get('/api/download/:jobId', async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        const outputDir = path.join('outputs', jobId);
+
+        if (!await fs.pathExists(outputDir)) {
+            return res.status(404).json({ error: 'Job not found' });
+        }
+
+        const zipPath = path.join('outputs', `${jobId}_processed.zip`);
+        const output = fs.createWriteStream(zipPath);
+        const archive = archiver('zip', { zlib: { level: 9 } });
+
+        archive.pipe(output);
+        archive.directory(outputDir, false);
+        await archive.finalize();
+
+        await new Promise((resolve) => output.on('close', resolve));
+
+        res.download(zipPath, `processed_files_${jobId}.zip`, (err) => {
+            if (err) {
+                logger.error('Download error:', err);
+            }
+            fs.remove(zipPath).catch(console.error);
+        });
+
+    } catch (error) {
+        logger.error('Download error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
-// ==================== PERFORMANCE MONITORING ENDPOINTS ====================
-// ADD THESE NEW ENDPOINTS HERE:
+// ==================== MONITORING ENDPOINTS ====================
 
-// Get current metrics
 app.get('/api/metrics', (req, res) => {
     try {
         const metrics = performanceMonitor.getMetrics();
@@ -614,11 +631,19 @@ app.get('/api/metrics', (req, res) => {
     }
 });
 
-// Health check endpoint
 app.get('/api/health', (req, res) => {
     try {
         const health = performanceMonitor.getHealthStatus();
-        res.json(health);
+        const signatureExists = fs.existsSync(SIGNATURE_PATH);
+        
+        res.json({
+            ...health,
+            services: {
+                formProcessor: 'active',
+                documentMerger: 'active',
+                signature: signatureExists ? 'available' : 'missing'
+            }
+        });
     } catch (error) {
         res.status(500).json({ 
             status: 'error', 
@@ -627,7 +652,6 @@ app.get('/api/health', (req, res) => {
     }
 });
 
-// Detailed system information
 app.get('/api/system-info', (req, res) => {
     try {
         const metrics = performanceMonitor.getMetrics();
@@ -663,62 +687,6 @@ app.get('/api/system-info', (req, res) => {
     }
 });
 
-// ==================== END MONITORING ENDPOINTS ====================
-
-// Clean up old files (runs daily at 2 AM)
-cron.schedule('0 2 * * *', async () => {
-    // ... your existing cron job code stays here
-});                                                                                                                                                                                
-                                                                                                                                                                                
-
-// ==================== SHARED ROUTES ====================
-
-// Download processed files (existing functionality)
-app.get('/api/download/:jobId', async (req, res) => {
-    try {
-        const { jobId } = req.params;
-        const outputDir = path.join('outputs', jobId);
-
-        if (!await fs.pathExists(outputDir)) {
-            return res.status(404).json({ error: 'Job not found' });
-        }
-
-        const zipPath = path.join('outputs', `${jobId}_processed.zip`);
-        const output = fs.createWriteStream(zipPath);
-        const archive = archiver('zip', { zlib: { level: 9 } });
-
-        archive.pipe(output);
-        archive.directory(outputDir, false);
-        await archive.finalize();
-
-        await new Promise((resolve) => output.on('close', resolve));
-
-        res.download(zipPath, `processed_files_${jobId}.zip`, (err) => {
-            if (err) {
-                logger.error('Download error:', err);
-            }
-            fs.remove(zipPath).catch(console.error);
-        });
-
-    } catch (error) {
-        logger.error('Download error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Health check
-app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        services: {
-            formProcessor: 'active',
-            documentMerger: 'active'
-        }
-    });
-});
-
-// Get application info
 app.get('/api/info', (req, res) => {
     res.json({
         name: 'PDF Processor & Merger Suite',
@@ -744,7 +712,6 @@ async function processEdiFile(filePath) {
         const manifest = {};
         
         data.forEach(row => {
-            // Adjust these column names based on your EDI format
             const consigneeRef = row['Consignees Reference'] || row['Reference'];
             const consigneeName = row['Consignees Name'] || row['Name'];
             
@@ -763,8 +730,6 @@ async function processEdiFile(filePath) {
 }
 
 async function processReferenceDocument(filePath) {
-    // This would call your Python script to extract manifest from PDF
-    // For now, return empty manifest
     logger.info('Reference document processing not yet implemented');
     return {};
 }
@@ -787,7 +752,7 @@ async function saveManifestAsCsv(manifest, filePath) {
     logger.info(`Manifest saved to ${filePath} with ${records.length} entries`);
 }
 
-// Cleanup old files (runs daily at 2 AM)
+// Cleanup old files (daily at 2 AM)
 cron.schedule('0 2 * * *', async () => {
     logger.info('Starting daily cleanup');
     
@@ -819,12 +784,14 @@ cron.schedule('0 2 * * *', async () => {
 async function startServer() {
     try {
         await ensureDirectories();
+        await ensureSignature();
         
         app.listen(PORT, () => {
             logger.info(`🚀 PDF Processor & Merger Suite running on port ${PORT}`);
             logger.info(`📋 Form Processor: http://localhost:${PORT}`);
             logger.info(`🚢 Document Merger: http://localhost:${PORT}#merger`);
             logger.info(`📊 Health Check: http://localhost:${PORT}/api/health`);
+            console.log('✅ Server ready!');
         });
     } catch (error) {
         logger.error('Failed to start server:', error);
@@ -833,89 +800,5 @@ async function startServer() {
 }
 
 startServer();
-
-module.exports = app;
-
-// Upload endpoint
-app.post('/api/upload', upload.array('pdfs', 50), (req, res) => {
-    try {
-        const uploadedFiles = req.files || [];
-        
-        if (uploadedFiles.length === 0) {
-            return res.status(400).json({ error: 'No files uploaded' });
-        }
-
-        console.log(`📁 Received ${uploadedFiles.length} PDF files:`);
-        uploadedFiles.forEach(file => {
-            console.log(`  - ${file.originalname} (${(file.size/1024/1024).toFixed(2)} MB)`);
-        });
-
-        const signatureExists = fs.existsSync('./signatures/default-signature.png');
-        console.log(`✍️  Default signature: ${signatureExists ? 'Found' : 'Missing'}`);
-
-        res.json({
-            success: true,
-            sessionId: Date.now().toString(),
-            message: `Successfully uploaded ${uploadedFiles.length} files`,
-            signatureAvailable: signatureExists,
-            files: uploadedFiles.map(f => ({
-                name: f.originalname,
-                size: f.size
-            }))
-        });
-
-    } catch (error) {
-        console.error('Upload error:', error);
-        res.status(500).json({ error: 'Upload failed' });
-    }
-});
-
-// Process endpoint
-app.post('/api/process', async (req, res) => {
-    try {
-        const { sessionId } = req.body;
-        
-        console.log(`🚀 Processing files for session ${sessionId}...`);
-        console.log('✍️  Using default signature: ./signatures/default-signature.png');
-        
-        // Simulate processing for now
-        setTimeout(() => {
-            res.json({
-                success: true,
-                message: 'Files processed successfully with signature overlay! (Demo mode)',
-                processed: 1,
-                successful: 1,
-                failed: 0
-            });
-        }, 2000);
-
-    } catch (error) {
-        console.error('Processing error:', error);
-        res.status(500).json({ error: 'Processing failed' });
-    }
-});
-
-// Health check
-app.get('/api/health', (req, res) => {
-    res.json({ 
-        status: 'healthy', 
-        timestamp: new Date().toISOString(),
-        signatureAvailable: fs.existsSync('./signatures/default-signature.png')
-    });
-});
-
-// Start server
-app.listen(port, () => {
-    console.log('🚀 PDF Processor Server Starting...');
-    console.log(`📱 Access at: http://localhost:${port}`);
-    
-    // Check if files exist
-    const indexExists = fs.existsSync('./public/index.html');
-    const signatureExists = fs.existsSync('./signatures/default-signature.png');
-    
-    console.log(`📄 index.html: ${indexExists ? 'Found' : 'Missing'}`);
-    console.log(`✍️  Signature: ${signatureExists ? 'Found' : 'Missing'}`);
-    console.log('✅ Server ready!');
-});
 
 module.exports = app;
