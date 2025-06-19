@@ -1,3 +1,81 @@
+# Add this import at the very top of your pdf_merger.py file (with your other imports)
+import argparse
+import sys
+
+# Add this new function anywhere in your pdf_merger.py file (I suggest after your PDFMerger class)
+def parse_command_line():
+    """Parse command line arguments - simple version"""
+    parser = argparse.ArgumentParser(description='PDF Merger - Merge shipping documents by client')
+    
+    # Required arguments
+    parser.add_argument('--input-folder', required=True,
+                       help='Folder containing PDF files to merge')
+    parser.add_argument('--output-folder', required=True,
+                       help='Folder to save merged PDF files')
+    
+    # Optional arguments for manifest
+    parser.add_argument('--edi-file',
+                       help='EDI Excel file (.xls or .xlsx) for client manifest')
+    parser.add_argument('--reference-doc',
+                       help='Reference PDF document to extract client manifest')
+    parser.add_argument('--manifest-file',
+                       help='Existing CSV manifest file')
+    
+    # Optional settings
+    parser.add_argument('--job-id',
+                       help='Job ID for web application processing')
+    parser.add_argument('--json-output', action='store_true',
+                       help='Output results as JSON (for web application)')
+    
+    return parser.parse_args()
+
+# Replace your existing "if __name__ == "__main__":" section with this:
+if __name__ == "__main__":
+    # Parse command line arguments
+    args = parse_command_line()
+    
+    # Check if input folder exists
+    if not Path(args.input_folder).exists():
+        print(f"❌ Error: Input folder does not exist: {args.input_folder}")
+        sys.exit(1)
+    
+    # Create PDF merger with command line arguments
+    try:
+        pdf_merger = PDFMerger(
+            input_folder=args.input_folder,
+            output_folder=args.output_folder,
+            edi_file=args.edi_file,
+            reference_doc=args.reference_doc
+        )
+        
+        # Load manifest file if specified
+        if args.manifest_file:
+            pdf_merger.load_manifest(args.manifest_file)
+        
+        # Process documents
+        pdf_merger.process_all_documents()
+        
+        # Simple success message
+        if args.json_output:
+            import json
+            result = {
+                'success': True,
+                'message': 'Processing completed successfully',
+                'output_folder': args.output_folder
+            }
+            print(json.dumps(result))
+        else:
+            print(f"\n✅ Processing complete! Check the '{args.output_folder}' folder for merged PDFs.")
+    
+    except Exception as e:
+        error_msg = f"Processing failed: {str(e)}"
+        if args.json_output:
+            import json
+            print(json.dumps({'success': False, 'error': error_msg}))
+        else:
+            print(f"❌ {error_msg}")
+        sys.exit(1)
+        
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
