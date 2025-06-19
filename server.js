@@ -631,6 +631,344 @@ app.get('/api/metrics', (req, res) => {
     }
 });
 
+// Add these new routes to your server.js after your existing routes
+
+// ==================== SMART UPLOAD ROUTES ====================
+
+// Serve the smart interface as an alternative
+app.get('/smart', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'smart.html'));
+});
+
+// Smart file analysis endpoint
+app.post('/api/smart-analyze', uploadProcessor.array('files'), async (req, res) => {
+    try {
+        logger.info(`Smart analysis: ${req.files.length} files`);
+        
+        const analysis = {
+            torForms: [],
+            adviceDocuments: [],
+            billsOfLading: [],
+            customerDocuments: [],
+            ediFiles: [],
+            signatures: [],
+            unknownPdfs: [],
+            processingMode: null,
+            recommendations: []
+        };
+
+        // Analyze each uploaded file
+        for (const file of req.files) {
+            const fileInfo = {
+                id: uuidv4(),
+                originalName: file.originalname,
+                filename: file.filename,
+                path: file.path,
+                size: file.size,
+                type: detectFileType(file.originalname)
+            };
+
+            // Categorize files
+            switch (fileInfo.type) {
+                case 'tor_form':
+                    analysis.torForms.push(fileInfo);
+                    break;
+                case 'advice_document':
+                    analysis.adviceDocuments.push(fileInfo);
+                    break;
+                case 'bill_of_lading':
+                    analysis.billsOfLading.push(fileInfo);
+                    break;
+                case 'customer_document':
+                    analysis.customerDocuments.push(fileInfo);
+                    break;
+                case 'edi_file':
+                    analysis.ediFiles.push(fileInfo);
+                    break;
+                case 'signature':
+                    analysis.signatures.push(fileInfo);
+                    break;
+                default:
+                    analysis.unknownPdfs.push(fileInfo);
+            }
+        }
+
+        // Determine processing mode
+        const hasShippingDocs = analysis.adviceDocuments.length + analysis.billsOfLading.length + analysis.customerDocuments.length > 0;
+        const hasTorForms = analysis.torForms.length > 0;
+
+        if (hasTorForms && hasShippingDocs) {
+            analysis.processingMode = 'combined';
+            analysis.recommendations.push('Process TOR forms and merge shipping documents');
+        } else if (hasTorForms) {
+            analysis.processingMode = 'form_processing';
+            analysis.recommendations.push('Add text overlays to TOR forms');
+        } else if (hasShippingDocs) {
+            analysis.processingMode = 'document_merging';
+            analysis.recommendations.push('Merge shipping documents by client');
+        } else {
+            analysis.processingMode = 'unknown';
+            analysis.recommendations.push('Manual classification required');
+        }
+
+        // Store analysis for later processing
+        const analysisId = uuidv4();
+        const analysisPath = path.join('manifests', `analysis_${analysisId}.json`);
+        await fs.writeJson(analysisPath, analysis);
+
+        res.json({
+            success: true,
+            analysis: analysis,
+            analysisId: analysisId,
+            message: `Analyzed ${req.files.length} files successfully`
+        });
+
+    } catch (error) {
+        logger.error('Smart analysis error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Smart auto-processing endpoint
+app.post('/api/smart-process', async (req, res) => {
+    const trackingJobId = `smart_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const job = performanceMonitor.startJob('smart-processor', trackingJobId);
+
+    try {
+        const { analysisId, settings } = req.body;
+        
+        // Load the analysis
+        const analysisPath = path.join('manifests', `analysis_${analysisId}.json`);
+        if (!await fs.pathExists(analysisPath)) {
+            throw new Error('Analysis not found');
+        }
+        
+        const analysis = await fs.readJson(analysisPath);
+        logger.info(`Smart processing: ${analysis.processingMode} mode`);
+
+        const results = {};
+        const jobId = uuidv4();
+
+        // Process TOR forms if any
+        if (analysis.torForms.length > 0) {
+            logger.info(`Processing ${analysis.torForms.length} TOR forms`);
+            
+            const formJobId = `forms_${jobId}`;
+            const formOutputDir = path.join('outputs', formJobId);
+            await fs.ensureDir(formOutputDir);
+
+            // Initialize text overlay processor
+            const processor = new TextOverlayProcessor();
+            
+            // Create temporary input directory
+            const tempInputDir = path.join('uploads', 'temp_forms_' + formJobId);
+            await fs.ensureDir(tempInputDir);
+
+            // Copy TOR form files to temp directory
+            for (const torForm of analysis.torForms) {
+                const sourcePath = torForm.path;
+                const destPath = path.join(tempInputDir, torForm.originalName);
+                if (await fs.pathExists(sourcePath)) {
+                    await fs.copy(sourcePath, destPath);
+                }
+            }
+
+            // Process the forms
+            const formResult = await processor.processBatch(tempInputDir, formOutputDir);
+            
+            // Clean up temp directory
+            await fs.remove(tempInputDir);
+            
+            results.formProcessing = {
+                success: true,
+                jobId: formJobId,
+                downloadUrl: `/api/download/${formJobId}`,
+                stats: formResult
+            };
+        }
+
+        // Process document merging if needed
+        if (analysis.adviceDocuments.length + analysis.billsOfLading.length + analysis.customerDocuments.length > 0) {
+            logger.info('Processing document merging');
+            
+            const mergerJobId = `merger_${jobId}`;
+            const mergerOutputDir = path.join('merger-outputs', mergerJobId);
+            await fs.ensureDir(mergerOutputDir);
+
+            // Copy relevant files to merger-uploads
+            const mergerInputDir = path.join('merger-uploads', 'temp_' + mergerJobId);
+            await fs.ensureDir(mergerInputDir);
+
+            // Copy shipping documents
+            const allShippingDocs = [
+                ...analysis.adviceDocuments,
+                ...analysis.billsOfLading,
+                ...analysis.customerDocuments
+            ];
+
+            for (const doc of allShippingDocs) {
+                if (await fs.pathExists(doc.path)) {
+                    await fs.copy(doc.path, path.join(mergerInputDir, doc.originalName));
+                }
+            }
+
+            // Copy EDI file if exists
+            let ediPath = null;
+            if (analysis.ediFiles.length > 0) {
+                const ediFile = analysis.ediFiles[0];
+                ediPath = path.join(mergerInputDir, ediFile.originalName);
+                if (await fs.pathExists(ediFile.path)) {
+                    await fs.copy(ediFile.path, ediPath);
+                }
+            }
+
+            // Run Python merger
+            const pythonOptions = {
+                mode: 'text',
+                pythonPath: 'python',
+                scriptPath: path.join(__dirname, 'python-scripts'),
+                args: [
+                    '--input-folder', mergerInputDir,
+                    '--output-folder', mergerOutputDir,
+                    '--job-id', mergerJobId,
+                    '--json-output'
+                ]
+            };
+
+            if (ediPath) {
+                pythonOptions.args.push('--edi-file', ediPath);
+            }
+
+            const mergerResults = await new Promise((resolve, reject) => {
+                PythonShell.run('pdf_merger.py', pythonOptions, (err, results) => {
+                    if (err) {
+                        logger.error('Python merger error:', err);
+                        reject(err);
+                    } else {
+                        try {
+                            const lastLine = results[results.length - 1];
+                            const result = JSON.parse(lastLine);
+                            resolve(result);
+                        } catch (parseErr) {
+                            logger.error('Failed to parse merger results:', parseErr);
+                            resolve({
+                                success: true,
+                                message: 'Merging completed, but could not parse detailed results'
+                            });
+                        }
+                    }
+                });
+            });
+
+            // Clean up temp directory
+            await fs.remove(mergerInputDir);
+
+            results.documentMerging = {
+                success: true,
+                jobId: mergerJobId,
+                downloadUrl: `/api/merger/download/${mergerJobId}`,
+                stats: mergerResults
+            };
+        }
+
+        // Complete tracking
+        const completedJob = performanceMonitor.completeJob(trackingJobId, results);
+
+        res.json({
+            success: true,
+            results: results,
+            processingMode: analysis.processingMode,
+            performance: {
+                duration: completedJob.duration,
+                mode: analysis.processingMode
+            },
+            downloadUrls: generateDownloadUrls(results)
+        });
+
+    } catch (error) {
+        performanceMonitor.failJob(trackingJobId, error);
+        logger.error('Smart processing error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Generate download URLs based on processing results
+function generateDownloadUrls(results) {
+    const urls = [];
+    
+    if (results.formProcessing && results.formProcessing.success) {
+        urls.push({
+            type: 'Form Processing Results',
+            url: results.formProcessing.downloadUrl,
+            description: 'TOR forms with text overlays'
+        });
+    }
+    
+    if (results.documentMerging && results.documentMerging.success) {
+        urls.push({
+            type: 'Merged Documents',
+            url: results.documentMerging.downloadUrl,
+            description: 'Shipping documents merged by client'
+        });
+    }
+    
+    return urls;
+}
+
+// File type detection utility
+function detectFileType(filename) {
+    const name = filename.toLowerCase();
+    
+    if (name.includes('tor') || name.includes('declaration')) {
+        return 'tor_form';
+    } else if (name.includes('advice') || name.includes('arrival')) {
+        return 'advice_document';
+    } else if (name.includes('bill') || name.includes('lading')) {
+        return 'bill_of_lading';
+    } else if (name.endsWith('.xls') || name.endsWith('.xlsx')) {
+        return 'edi_file';
+    } else if (/\d{3}[-\/]\d{3}[-\/]\d{3}/.test(name)) {
+        return 'customer_document';
+    } else if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.gif')) {
+        return 'signature';
+    } else if (name.endsWith('.pdf')) {
+        return 'unknown_pdf';
+    }
+    
+    return 'unknown';
+}
+
+// Health check endpoint specifically for smart mode
+app.get('/api/smart/health', (req, res) => {
+    try {
+        const health = performanceMonitor.getHealthStatus();
+        const signatureExists = fs.existsSync(SIGNATURE_PATH);
+        
+        res.json({
+            ...health,
+            smartMode: {
+                status: 'active',
+                features: [
+                    'Auto file detection',
+                    'Smart processing mode selection',
+                    'Combined form processing and document merging'
+                ]
+            },
+            services: {
+                formProcessor: 'active',
+                documentMerger: 'active',
+                signature: signatureExists ? 'available' : 'missing',
+                smartAnalysis: 'active'
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            status: 'error', 
+            error: error.message 
+        });
+    }
+});
+
 app.get('/api/health', (req, res) => {
     try {
         const health = performanceMonitor.getHealthStatus();
