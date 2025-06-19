@@ -1,3 +1,5 @@
+const { performance } = require('perf_hooks');
+const fs = require('fs-extra');
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
@@ -17,6 +19,139 @@ const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Simple Performance Monitor Class
+class SimplePerformanceMonitor {
+    constructor() {
+        this.metrics = {
+            totalRequests: 0,
+            successfulRequests: 0,
+            failedRequests: 0,
+            totalProcessingTime: 0,
+            averageProcessingTime: 0,
+            mergerJobs: 0,
+            formProcessorJobs: 0,
+            startTime: Date.now(),
+            errors: []
+        };
+        
+        this.activeJobs = new Map();
+    }
+    
+    // Start tracking a job
+    startJob(jobType, jobId, details = {}) {
+        const job = {
+            type: jobType,
+            id: jobId,
+            startTime: performance.now(),
+            details,
+            status: 'running'
+        };
+        
+        this.activeJobs.set(jobId, job);
+        console.log(`📊 Started ${jobType} job: ${jobId}`);
+        
+        return job;
+    }
+    
+    // Complete a job successfully
+    completeJob(jobId, result = {}) {
+        const job = this.activeJobs.get(jobId);
+        if (!job) return null;
+        
+        const duration = performance.now() - job.startTime;
+        job.duration = duration;
+        job.status = 'completed';
+        job.result = result;
+        
+        // Update metrics
+        this.metrics.totalRequests++;
+        this.metrics.successfulRequests++;
+        this.metrics.totalProcessingTime += duration;
+        this.metrics.averageProcessingTime = this.metrics.totalProcessingTime / this.metrics.successfulRequests;
+        
+        if (job.type === 'merger') {
+            this.metrics.mergerJobs++;
+        } else if (job.type === 'form-processor') {
+            this.metrics.formProcessorJobs++;
+        }
+        
+        this.activeJobs.delete(jobId);
+        
+        console.log(`✅ Completed ${job.type} job: ${jobId} (${duration.toFixed(2)}ms)`);
+        return job;
+    }
+    
+    // Mark a job as failed
+    failJob(jobId, error) {
+        const job = this.activeJobs.get(jobId);
+        if (!job) return null;
+        
+        const duration = performance.now() - job.startTime;
+        job.duration = duration;
+        job.status = 'failed';
+        job.error = error.message || error;
+        
+        // Update metrics
+        this.metrics.totalRequests++;
+        this.metrics.failedRequests++;
+        
+        // Keep track of recent errors (last 50)
+        this.metrics.errors.push({
+            jobId,
+            type: job.type,
+            error: job.error,
+            timestamp: new Date().toISOString()
+        });
+        
+        if (this.metrics.errors.length > 50) {
+            this.metrics.errors = this.metrics.errors.slice(-50);
+        }
+        
+        this.activeJobs.delete(jobId);
+        
+        console.log(`❌ Failed ${job.type} job: ${jobId} - ${job.error}`);
+        return job;
+    }
+    
+    // Get current metrics
+    getMetrics() {
+        const uptime = Date.now() - this.metrics.startTime;
+        const successRate = this.metrics.totalRequests > 0 ? 
+            (this.metrics.successfulRequests / this.metrics.totalRequests * 100).toFixed(2) : 0;
+        
+        return {
+            ...this.metrics,
+            uptime: uptime,
+            uptimeHours: (uptime / (1000 * 60 * 60)).toFixed(2),
+            successRate: `${successRate}%`,
+            activeJobs: this.activeJobs.size,
+            currentTime: new Date().toISOString()
+        };
+    }
+    
+    // Get health status
+    getHealthStatus() {
+        const metrics = this.getMetrics();
+        const recentErrors = this.metrics.errors.filter(
+            error => Date.now() - new Date(error.timestamp).getTime() < 60000 // Last minute
+        );
+        
+        const isHealthy = recentErrors.length === 0 && parseFloat(metrics.successRate) > 95;
+        
+        return {
+            status: isHealthy ? 'healthy' : 'degraded',
+            uptime: metrics.uptimeHours + ' hours',
+            successRate: metrics.successRate,
+            activeJobs: metrics.activeJobs,
+            recentErrors: recentErrors.length,
+            lastCheck: new Date().toISOString()
+        };
+    }
+}
+
+// Create global performance monitor
+const performanceMonitor = new SimplePerformanceMonitor();
 
 // Enhanced logging
 const logger = winston.createLogger({
@@ -260,7 +395,16 @@ app.post('/api/merger/process-manifest', async (req, res) => {
 });
 
 // Main merger processing endpoint
+// Main merger processing endpoint - ENHANCED WITH PERFORMANCE MONITORING
 app.post('/api/merger/process', async (req, res) => {
+    // Generate job ID and start performance tracking
+    const trackingJobId = `merger_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const job = performanceMonitor.startJob('merger', trackingJobId, {
+        fileCount: req.body.files?.pdfFiles?.length || 0,
+        hasEdi: !!req.body.ediFile,
+        settings: req.body.settings
+    });
+    
     try {
         const { files, settings, manifestPath } = req.body;
         logger.info(`Starting merger process with ${files.pdfFiles?.length || 0} PDF files`);
@@ -280,6 +424,66 @@ app.post('/api/merger/process', async (req, res) => {
                 '--job-id', jobId
             ]
         };
+
+        // Add manifest if available
+        if (manifestPath && await fs.pathExists(manifestPath)) {
+            pythonOptions.args.push('--manifest-file', manifestPath);
+        }
+
+        // Add settings
+        if (settings) {
+            if (settings.namingFormat) {
+                pythonOptions.args.push('--naming-format', settings.namingFormat);
+            }
+            if (settings.pageOrder) {
+                pythonOptions.args.push('--page-order', settings.pageOrder);
+            }
+        }
+
+        // Execute Python merger script
+        const results = await new Promise((resolve, reject) => {
+            PythonShell.run('pdf_merger.py', pythonOptions, (err, results) => {
+                if (err) {
+                    logger.error('Python script error:', err);
+                    reject(err);
+                } else {
+                    try {
+                        const result = JSON.parse(results[results.length - 1]);
+                        resolve(result);
+                    } catch (parseErr) {
+                        logger.error('Failed to parse Python results:', parseErr);
+                        reject(parseErr);
+                    }
+                }
+            });
+        });
+
+        // Add job info to results
+        results.jobId = jobId;
+        results.downloadUrl = `/api/merger/download/${jobId}`;
+
+        logger.info(`Merger processing completed for job ${jobId}`);
+
+        // Complete the performance tracking job successfully
+        const completedJob = performanceMonitor.completeJob(trackingJobId, results);
+        
+        res.json({
+            success: true,
+            ...results,
+            performance: {
+                duration: completedJob.duration,
+                filesPerSecond: (results.stats?.processed_files || 0) / (completedJob.duration / 1000)
+            }
+        });
+
+    } catch (error) {
+        // Mark the performance tracking job as failed
+        performanceMonitor.failJob(trackingJobId, error);
+        
+        logger.error('Merger processing error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 
         // Add manifest if available
         if (manifestPath && await fs.pathExists(manifestPath)) {
@@ -374,6 +578,83 @@ app.get('/api/merger/download/:jobId', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// Download merged files
+app.get('/api/merger/download/:jobId', async (req, res) => {
+    // ... your existing download code stays here
+});
+
+// ==================== PERFORMANCE MONITORING ENDPOINTS ====================
+// ADD THESE NEW ENDPOINTS HERE:
+
+// Get current metrics
+app.get('/api/metrics', (req, res) => {
+    try {
+        const metrics = performanceMonitor.getMetrics();
+        res.json({
+            success: true,
+            metrics: metrics
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+    try {
+        const health = performanceMonitor.getHealthStatus();
+        res.json(health);
+    } catch (error) {
+        res.status(500).json({ 
+            status: 'error', 
+            error: error.message 
+        });
+    }
+});
+
+// Detailed system information
+app.get('/api/system-info', (req, res) => {
+    try {
+        const metrics = performanceMonitor.getMetrics();
+        
+        res.json({
+            application: {
+                name: 'PDF Tools Suite',
+                version: '2.0.0',
+                uptime: metrics.uptimeHours + ' hours',
+                startTime: new Date(metrics.startTime).toISOString()
+            },
+            performance: {
+                totalRequests: metrics.totalRequests,
+                successfulRequests: metrics.successfulRequests,
+                failedRequests: metrics.failedRequests,
+                successRate: metrics.successRate,
+                averageProcessingTime: metrics.averageProcessingTime.toFixed(2) + 'ms'
+            },
+            jobs: {
+                mergerJobs: metrics.mergerJobs,
+                formProcessorJobs: metrics.formProcessorJobs,
+                activeJobs: metrics.activeJobs
+            },
+            system: {
+                memoryUsage: process.memoryUsage(),
+                platform: process.platform,
+                nodeVersion: process.version,
+                currentTime: new Date().toISOString()
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ==================== END MONITORING ENDPOINTS ====================
+
+// Clean up old files (runs daily at 2 AM)
+cron.schedule('0 2 * * *', async () => {
+    // ... your existing cron job code stays here
+});                                                                                                                                                                                
+                                                                                                                                                                                
 
 // ==================== SHARED ROUTES ====================
 
