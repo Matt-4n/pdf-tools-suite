@@ -287,13 +287,14 @@ class PDFMergerGUI:
             if Path(edi_dest).exists():
                 Path(edi_dest).unlink()
             
-            self.log_message("✅ Processing complete!")
-            self.log_message(f"📁 Output files saved to: {output_dir}")
-            
-            # Show completion message
-            self.root.after(0, lambda: messagebox.showinfo(
-                "Success", 
-                f"Processing complete!\n\nMerged PDFs saved to:\n{output_dir}"
+        self.log_message("✅ Processing complete!")
+        self.log_message(f"📁 Output files saved to: {output_dir}")
+        self.log_message("ℹ️ Note: Use your form filling app for completing customer documents")
+
+        # Show completion message
+        self.root.after(0, lambda: messagebox.showinfo(
+            "Success", 
+            f"PDF Merging complete!\n\nMerged PDFs saved to:\n{output_dir}\n\nUse your form filling app to complete customer documents."
             ))
             
         except Exception as e:
