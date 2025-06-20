@@ -293,34 +293,26 @@ class PDFMerger:
             return ""
     
     def find_client_info_on_page(self, text):
-        """Extract consignee reference and get name from manifest"""
-        consignee_ref = None
-        full_name = None
-        
-        # Find consignee reference first
+        """Extract consignee reference and match against EDI manifest ONLY"""
+        # Find consignee reference in text
         ref_patterns = [
-            r'BL\s*No\s*:\s*(\d{3}/\d{3}/\d{3})',
-            r'Consignee\s*Reference:\s*(\d{3}/\d{3}/\d{3})',
-            r'Cust\s*Ref:\s*(\d{3}/\d{3}/\d{3})',
-            r'(\d{3}/\d{3}/\d{3})'
+            r'(\d{3}/\d{3}/\d{3})',  # 000/531/023
+            r'(\d{3}-\d{3}-\d{3})',  # 000-531-023
         ]
         
         for pattern in ref_patterns:
-            match = re.search(pattern, text)
-            if match:
-                consignee_ref = match.group(1) if len(match.groups()) > 0 else match.group(0)
-                break
+            matches = re.findall(pattern, text)
+            for match in matches:
+                # Normalize reference format
+                normalized_ref = match.replace('-', '/')
+                
+                # Check if this reference exists in EDI manifest
+                if normalized_ref in self.manifest:
+                    consignee_ref = normalized_ref
+                    full_name = self.manifest[normalized_ref]
+                    return consignee_ref, full_name
         
-        if consignee_ref:
-            # Check manifest first
-            manifest_name = self.get_name_from_manifest(consignee_ref)
-            if manifest_name:
-                return consignee_ref, manifest_name
-            
-            # If not in manifest, use reference number
-            self.logger.warning(f"Client {consignee_ref} not found in manifest")
-            return consignee_ref, f"Client_{consignee_ref.replace('/', '_')}"
-        
+        # No EDI match found
         return None, None
     
     def is_valid_name(self, name):
@@ -392,45 +384,67 @@ class PDFMerger:
         
         return doc
     
-    def process_customer_document(self, pdf_path):
-        """Process individual customer document"""
+    def process_customer_document_edi_first(self, pdf_path):
+        """Process individual customer document using EDI-first matching"""
         self.logger.info(f"Processing Customer Document: {pdf_path.name}")
         
-        # Extract consignee reference from filename if possible
+        # First, try to extract reference from filename
         filename = pdf_path.name
         ref_match = re.search(r'(\d{3}[-/]\d{3}[-/]\d{3})', filename)
         
+        doc = fitz.open(pdf_path)
+        
         if ref_match:
-            consignee_ref = ref_match.group(1).replace('-', '/')
+            file_ref = ref_match.group(1).replace('-', '/')
             
-            # Also extract client info from document content
-            doc = fitz.open(pdf_path)
-            text = ""
-            for page in doc:
-                text += page.get_text()
-            
-            _, full_name = self.find_client_info_on_page(text)
-            
-            self.logger.info(f"Customer Doc: {consignee_ref} - {full_name}")
-            
-            # Store customer document info
-            client_key = consignee_ref
-            if not self.clients[client_key]['info']:
-                self.clients[client_key]['info'] = (consignee_ref, full_name)
-            
-            # Add all pages of customer document to this client
-            for page_num in range(len(doc)):
-                self.clients[client_key]['pages'].append({
-                    'source_doc': pdf_path,
-                    'page_num': page_num,
-                    'doc_type': 'Customer Document',
-                    'doc_obj': doc
-                })
-            
-            return doc
-        else:
-            self.logger.error(f"Could not extract reference from filename: {filename}")
-            return None
+            # Check if this reference exists in EDI manifest
+            if file_ref in self.manifest:
+                client_name = self.manifest[file_ref]
+                self.logger.info(f"Customer Doc: {file_ref} - {client_name} (EDI match)")
+                
+                # Store customer document info
+                if not self.clients[file_ref]['info']:
+                    self.clients[file_ref]['info'] = (file_ref, client_name)
+                
+                # Add all pages of customer document to this client
+                for page_num in range(len(doc)):
+                    self.clients[file_ref]['pages'].append({
+                        'source_doc': pdf_path,
+                        'page_num': page_num,
+                        'doc_type': 'Customer Document',
+                        'doc_obj': doc
+                    })
+                
+                return doc
+        
+        # If filename didn't work, scan document content for EDI references
+        text = ""
+        for page in doc:
+            text += page.get_text()
+        
+        # Look for any EDI reference in the document text
+        for edi_ref in self.manifest.keys():
+            if edi_ref in text or edi_ref.replace('/', '-') in text:
+                client_name = self.manifest[edi_ref]
+                self.logger.info(f"Customer Doc: {edi_ref} - {client_name} (EDI content match)")
+                
+                if not self.clients[edi_ref]['info']:
+                    self.clients[edi_ref]['info'] = (edi_ref, client_name)
+                
+                for page_num in range(len(doc)):
+                    self.clients[edi_ref]['pages'].append({
+                        'source_doc': pdf_path,
+                        'page_num': page_num,
+                        'doc_type': 'Customer Document',
+                        'doc_obj': doc
+                    })
+                
+                return doc
+        
+        # Document doesn't match any EDI reference
+        self.logger.warning(f"Customer document {pdf_path.name} does not match any EDI reference - skipping")
+        doc.close()
+        return None
     
     def merge_client_documents(self, client_key, client_data):
         """Merge all documents for a specific client with optimization"""
@@ -524,14 +538,20 @@ class PDFMerger:
         return True
     
     def process_all_documents(self):
-        """Main process: analyze all PDFs and merge by client"""
+        """Main process: analyze all PDFs and merge by EDI client list ONLY"""
         pdf_files = list(self.input_folder.glob("*.pdf"))
         
         if not pdf_files:
             self.logger.error("No PDF files found!")
             return
         
+        # CRITICAL: Only proceed if we have an EDI manifest
+        if not self.manifest:
+            self.logger.error("No EDI manifest loaded! Cannot process without client list.")
+            return
+        
         self.logger.info(f"Found {len(pdf_files)} PDF files to process")
+        self.logger.info(f"EDI manifest contains {len(self.manifest)} clients")
         
         opened_docs = []  # Keep track of opened documents
         
@@ -549,21 +569,35 @@ class PDFMerger:
                     opened_docs.append(doc)
             else:
                 # Assume it's a customer document
-                doc = self.process_customer_document(pdf_path)
+                doc = self.process_customer_document_edi_first(pdf_path)
                 if doc:
                     opened_docs.append(doc)
         
-        # Now merge documents for each client
-        self.logger.info(f"MERGING DOCUMENTS FOR {len(self.clients)} CLIENTS")
+        # ONLY merge documents for EDI clients
+        edi_clients_processed = 0
         
-        for client_key, client_data in self.clients.items():
-            self.merge_client_documents(client_key, client_data)
+        self.logger.info(f"MERGING DOCUMENTS FOR {len(self.manifest)} EDI CLIENTS")
+        
+        for edi_ref, edi_name in self.manifest.items():
+            # Check if this EDI client has any documents
+            if edi_ref in self.clients and self.clients[edi_ref]['pages']:
+                self.logger.info(f"Processing EDI client: {edi_ref} - {edi_name}")
+                
+                # Ensure we use the EDI name as authoritative
+                self.clients[edi_ref]['info'] = (edi_ref, edi_name)
+                
+                success = self.merge_client_documents(edi_ref, self.clients[edi_ref])
+                if success:
+                    edi_clients_processed += 1
+            else:
+                self.logger.warning(f"No documents found for EDI client: {edi_ref} - {edi_name}")
         
         # Close all opened documents
         for doc in opened_docs:
             doc.close()
         
         self.logger.info(f"✅ Process complete! Check the '{self.output_folder.name}' folder for merged PDFs.")
+        self.logger.info(f"📊 EDI clients: {len(self.manifest)} | Processed: {edi_clients_processed}")
 
 def parse_command_line():
     """Parse command line arguments with optimization options"""

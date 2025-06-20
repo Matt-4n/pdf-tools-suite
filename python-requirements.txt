@@ -1,0 +1,10 @@
+# Python requirements for PDF merger functionality
+PyMuPDF>=1.23.0
+openpyxl>=3.1.0
+xlrd>=2.0.1
+pathlib2>=2.3.7
+argparse>=1.4.0
+
+# Optional: Enhanced features
+python-magic>=0.4.27
+Pillow>=10.0.0

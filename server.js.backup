@@ -448,7 +448,99 @@ app.post('/api/merger/process-manifest', async (req, res) => {
     }
 });
 
+// Main merger processing endpoint
+app.post('/api/merger/process', async (req, res) => {
+    const trackingJobId = `merger_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const job = performanceMonitor.startJob('merger', trackingJobId, {
+        fileCount: req.body.files?.pdfFiles?.length || 0,
+        hasEdi: !!req.body.ediFile,
+        settings: req.body.settings
+    });
+    
+    try {
+        const { files, settings, manifestPath } = req.body;
+        logger.info(`Starting merger process with ${files.pdfFiles?.length || 0} PDF files`);
 
+        const jobId = uuidv4();
+        const outputDir = path.join('merger-outputs', jobId);
+        await fs.ensureDir(outputDir);
+
+        const pythonOptions = {
+            mode: 'text',
+            pythonPath: 'python',
+            scriptPath: path.join(__dirname, 'python-scripts'),
+            args: [
+                '--input-folder', 'merger-uploads',
+                '--output-folder', outputDir,
+                '--job-id', jobId,
+                '--json-output'
+            ]
+        };
+
+        if (manifestPath && await fs.pathExists(manifestPath)) {
+            pythonOptions.args.push('--manifest-file', manifestPath);
+        }
+
+        if (settings) {
+            if (settings.namingFormat) {
+                pythonOptions.args.push('--naming-format', settings.namingFormat);
+            }
+            if (settings.pageOrder) {
+                pythonOptions.args.push('--page-order', settings.pageOrder);
+            }
+        }
+
+        const results = await new Promise((resolve, reject) => {
+            PythonShell.run('pdf_merger.py', pythonOptions, (err, results) => {
+                if (err) {
+                    logger.error('Python script error:', err);
+                    reject(err);
+                } else {
+                    try {
+                        const lastLine = results[results.length - 1];
+                        const result = JSON.parse(lastLine);
+                        resolve(result);
+                    } catch (parseErr) {
+                        logger.error('Failed to parse Python results:', parseErr);
+                        resolve({
+                            success: true,
+                            message: 'Processing completed, but could not parse detailed results',
+                            stats: {
+                                processed_files: files.pdfFiles?.length || 0,
+                                merged_clients: 0
+                            }
+                        });
+                    }
+                }
+            });
+        });
+
+        results.jobId = jobId;
+        results.downloadUrl = `/api/merger/download/${jobId}`;
+
+        logger.info(`Merger processing completed for job ${jobId}`);
+
+        const completedJob = performanceMonitor.completeJob(trackingJobId, results);
+        
+        res.json({
+            success: true,
+            ...results,
+            performance: {
+                duration: completedJob.duration,
+                filesPerSecond: (results.stats?.processed_files || 0) / (completedJob.duration / 1000)
+            }
+        });
+
+    } catch (error) {
+        performanceMonitor.failJob(trackingJobId, error);
+        logger.error('Merger processing error:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            jobId: trackingJobId
+        });
+    }
+});
 
 // Download merged files
 app.get('/api/merger/download/:jobId', async (req, res) => {
@@ -492,7 +584,7 @@ app.get('/api/merger/download/:jobId', async (req, res) => {
 
 // Add this new endpoint after your existing /api/merger/process endpoint in server.js
 
-// Main merger processing endpoint with page 9 overlays
+// Enhanced merger processing with page 9 overlays
 app.post('/api/merger/process', async (req, res) => {
     const trackingJobId = `merger_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const job = performanceMonitor.startJob('merger', trackingJobId, {
@@ -567,19 +659,15 @@ app.post('/api/merger/process', async (req, res) => {
             
             if (pdfFiles.length > 0) {
                 // Initialize text overlay processor
-                // Remove this line:
-            // const TextOverlayProcessor = require('./textOverlay.js');
-
-            // And replace with (since you already imported it at the top):
-            const overlayProcessor = new TextOverlayProcessor();
+                const TextOverlayProcessor = require('./textOverlay.js');
                 const processor = new TextOverlayProcessor();
                 
                 // Extract shipment data from the first PDF file
                 const firstPdfPath = path.join(outputDir, pdfFiles[0]);
-                await overlayProcessor.extractShipmentData(firstPdfPath);
+                await processor.extractShipmentData(firstPdfPath);
                 
-                if (overlayProcessor.shipmentData) {
-                    logger.info(`Extracted shipment data: Container ${overlayProcessor.shipmentData.containerNumber}, Ship ${overlayProcessor.shipmentData.shipName}`);
+                if (processor.shipmentData) {
+                    logger.info(`Extracted shipment data: Container ${processor.shipmentData.containerNumber}, Ship ${processor.shipmentData.shipName}`);
                     
                     // Process each merged PDF with overlays
                     for (const pdfFile of pdfFiles) {
@@ -588,7 +676,7 @@ app.post('/api/merger/process', async (req, res) => {
                         
                         logger.info(`Applying overlays to: ${pdfFile}`);
                         
-                         const overlayResult = await overlayProcessor.processSinglePDFWithOverlay(inputPath, tempPath);
+                        const overlayResult = await processor.processSinglePDFWithOverlay(inputPath, tempPath);
                         
                         if (overlayResult.success) {
                             // Replace original with overlay version
@@ -600,7 +688,7 @@ app.post('/api/merger/process', async (req, res) => {
                     }
                     
                     mergerResults.overlaysApplied = pdfFiles.length;
-                    mergerResults.shipmentData = overlayProcessor.shipmentData;
+                    mergerResults.shipmentData = processor.shipmentData;
                 } else {
                     logger.warning('Could not extract shipment data for overlays');
                     mergerResults.overlaysApplied = 0;
