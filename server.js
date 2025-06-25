@@ -1,3 +1,4 @@
+
 const { performance } = require('perf_hooks');
 const express = require('express');
 const multer = require('multer');
@@ -516,7 +517,7 @@ app.post('/api/merger/process', async (req, res) => {
         // Step 1: Run Python merger first
         const pythonOptions = {
             mode: 'text',
-            pythonPath: 'python',
+            pythonPath: '/Users/matthewforan/SevenSeas_Code_Project/pdf-tools-suite-1/.venv/bin/python',
             scriptPath: path.join(__dirname, 'python-scripts'),
             args: [
                 '--input-folder', 'merger-uploads',
@@ -881,7 +882,7 @@ app.post('/api/smart-process', async (req, res) => {
             // Run Python merger
             const pythonOptions = {
                 mode: 'text',
-                pythonPath: 'python',
+                pythonPath: '/Users/matthewforan/SevenSeas_Code_Project/pdf-tools-suite-1/.venv/bin/python',
                 scriptPath: path.join(__dirname, 'python-scripts'),
                 args: [
                     '--input-folder', mergerInputDir,
