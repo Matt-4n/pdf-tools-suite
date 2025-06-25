@@ -96,374 +96,373 @@ class PDFMerger:
         else:
             # Try to load existing CSV manifest
             self.load_manifest("client_manifest.csv")
-    
+        
+        # NEW: Add tracking for reports
+        self.compression_report = []
+        self.tax_alerts = [] 
+
     def create_manifest_from_edi(self, edi_file_path):
         """Create CSV manifest from EDI Excel file"""
         edi_path = Path(edi_file_path)
         if not edi_path.exists():
             self.logger.error(f"EDI file not found: {edi_file_path}")
             return
-        
+
         if not EXCEL_AVAILABLE:
             self.logger.error("Excel libraries not available. Please install openpyxl or xlrd.")
             return
-        
+
         self.logger.info(f"Creating manifest from EDI file: {edi_file_path}")
-        
+
         try:
             manifest_data = {}
-            
+
             # Check file extension and use appropriate library
             if str(edi_path).endswith('.xls'):
                 # Use xlrd for .xls files
                 import xlrd
                 workbook = xlrd.open_workbook(edi_path)
                 sheet = workbook.sheet_by_index(0)
-                
+
                 # Read data starting from row 1 (skip header row 0)
                 for row_idx in range(1, sheet.nrows):
                     row = sheet.row_values(row_idx)
                     if len(row) > 11:  # Ensure we have enough columns
                         consignee_name = row[6]  # Column 6: "Consignees Name"
                         consignee_ref = row[11]  # Column 11: "Consignees Reference"
-                        
+
                         if consignee_ref and consignee_name:
                             # Clean up the reference format
                             ref_clean = str(consignee_ref).strip()
                             name_clean = str(consignee_name).strip()
-                            
-                            if ref_clean and name_clean:
-                                if self.is_valid_name(name_clean):
-                                    manifest_data[ref_clean] = name_clean
-                                    self.logger.debug(f"Added: {ref_clean} -> {name_clean}")
-            
+
+                            # For EDI files, trust the data completely - no validation
+                            if ref_clean and name_clean and ref_clean != 'nan' and name_clean != 'nan':
+                                manifest_data[ref_clean] = name_clean
+                                self.logger.debug(f"Added EDI entry: {ref_clean} -> {name_clean}")
+
             else:
                 # Use openpyxl for .xlsx files
                 from openpyxl import load_workbook
-                workbook = load_workbook(edi_path, read_only=True)
+                workbook = load_workbook(edi_path)
                 sheet = workbook.active
-                
-                # Read data starting from row 2 (skip header)
+
+                # Read data starting from row 2 (skip header row 1)
                 for row in sheet.iter_rows(min_row=2, values_only=True):
-                    if row and len(row) > 11:  # Ensure we have enough columns
+                    if len(row) > 11:  # Ensure we have enough columns
                         consignee_name = row[6]  # Column 6: "Consignees Name"
                         consignee_ref = row[11]  # Column 11: "Consignees Reference"
-                        
+
                         if consignee_ref and consignee_name:
                             # Clean up the reference format
                             ref_clean = str(consignee_ref).strip()
                             name_clean = str(consignee_name).strip()
-                            
-                            if ref_clean and name_clean:
-                                if self.is_valid_name(name_clean):
-                                    manifest_data[ref_clean] = name_clean
-                                    self.logger.debug(f"Added: {ref_clean} -> {name_clean}")
-            
-            # Save to CSV file
+
+                            # For EDI files, trust the data completely - no validation
+                            if ref_clean and name_clean and ref_clean != 'nan' and name_clean != 'nan':
+                                manifest_data[ref_clean] = name_clean
+                                self.logger.debug(f"Added EDI entry: {ref_clean} -> {name_clean}")
+
+            # Create CSV file
             csv_path = "client_manifest.csv"
             with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow(['ConsigneeRef', 'FullName'])  # Header
-                
+                writer.writerow(['ConsigneeRef', 'FullName'])
+
                 for ref, name in sorted(manifest_data.items()):
                     writer.writerow([ref, name])
-            
+
             self.logger.info(f"Created manifest CSV with {len(manifest_data)} clients: {csv_path}")
-            
+
             # Load the created manifest into memory
             self.manifest = manifest_data
-            
+
         except Exception as e:
             self.logger.error(f"Error creating manifest from EDI file: {e}")
-            if self.reference_doc:
-                self.create_manifest_from_reference(self.reference_doc)
-            else:
-                self.load_manifest("client_manifest.csv")
 
-    def create_manifest_from_reference(self, reference_doc_path):
-        """Create CSV manifest from reference PDF document"""
-        reference_path = Path(reference_doc_path)
-        if not reference_path.exists():
-            self.logger.error(f"Reference document not found: {reference_doc_path}")
+    def create_manifest_from_reference(self, reference_doc):
+        """Create manifest from reference PDF document - placeholder implementation"""
+        self.logger.info(f"Creating manifest from reference document: {reference_doc}")
+        # TODO: Implement this method if needed
+        pass
+
+    def load_manifest(self, manifest_file):
+        """Load existing CSV manifest - placeholder implementation"""
+        self.logger.info(f"Loading manifest from file: {manifest_file}")
+        # TODO: Implement this method if needed
+        pass
+
+    def scan_for_tax_keywords(self, doc, client_name, client_ref):
+        """
+        Scan every page after page 12 of a document for tax-relevant keywords
+        """
+        tax_keywords = ['tools', 'alcohol', 'new']
+        found_keywords = []
+
+        total_pages = len(doc)
+        # Scan all pages after page 12 (manifest section)
+        start_page = 12  # Start from page 13 (0-indexed = 12)
+
+        if total_pages <= 12:
+            self.logger.debug(f"Document only has {total_pages} pages, skipping tax scan: {client_name}")
             return
-        
-        self.logger.info(f"Creating manifest from reference document: {reference_doc_path}")
+
+        self.logger.debug(f"Scanning pages {start_page + 1}-{total_pages} for tax keywords: {client_name}")
+
+        for page_num in range(start_page, total_pages):
+            try:
+                page = doc[page_num]
+                text = page.get_text().lower()
+
+                for keyword in tax_keywords:
+                    if keyword in text:
+                        # Find context around the keyword
+                        words = text.split()
+                        for i, word in enumerate(words):
+                            if keyword in word:
+                                # Get 3 words before and after for context
+                                context_start = max(0, i - 3)
+                                context_end = min(len(words), i + 4)
+                                context = ' '.join(words[context_start:context_end])
+
+                                found_keywords.append({
+                                    'keyword': keyword.upper(),
+                                    'page': page_num + 1,
+                                    'context': context.strip()
+                                })
+                                self.logger.info(f"🚨 TAX ALERT: {keyword.upper()} found in {client_name} (Page {page_num + 1})")
+                                break  # Only record first occurrence per page
+
+            except Exception as e:
+                self.logger.debug(f"Could not scan page {page_num + 1}: {e}")
+
+        # Store tax alerts for this client
+        if found_keywords:
+            self.tax_alerts.append({
+                'client_name': client_name,
+                'client_ref': client_ref,
+                'alerts': found_keywords
+            })
+
+    def generate_compression_report(self):
+        """
+        Generate a detailed compression report
+        """
+        if not self.compression_report:
+            return "No compression data available."
+
+        report = []
+        report.append("=" * 80)
+        report.append("📊 PDF COMPRESSION REPORT")
+        report.append("=" * 80)
+
+        total_original = sum(item['original_size_mb'] for item in self.compression_report)
+        total_final = sum(item['final_size_mb'] for item in self.compression_report)
+        total_saved = total_original - total_final
+
+        report.append(f"📈 SUMMARY:")
+        report.append(f"   • Files processed: {len(self.compression_report)}")
+        report.append(f"   • Total space saved: {total_saved:.2f} MB")
+        report.append(f"   • Average compression: {total_original/total_final:.1f}x")
+        report.append(f"   • Overall size reduction: {(total_saved/total_original)*100:.1f}%")
+        report.append("")
+
+        report.append("📁 INDIVIDUAL FILES:")
+        report.append("-" * 80)
+
+        # Sort by savings (largest first)
+        sorted_files = sorted(self.compression_report, key=lambda x: x['savings_mb'], reverse=True)
+
+        for item in sorted_files:
+            savings_pct = (item['savings_mb'] / item['original_size_mb']) * 100
+            report.append(f"• {item['filename']}")
+            report.append(f"  {item['original_size_mb']:.2f}MB → {item['final_size_mb']:.2f}MB "
+                         f"(saved {item['savings_mb']:.2f}MB, {savings_pct:.1f}%)")
+            report.append("")
+
+        return "\n".join(report)
+
+    def generate_tax_alert_report(self):
+        """
+        Generate a tax alert report for keywords found
+        """
+        if not self.tax_alerts:
+            return "✅ No tax-relevant keywords found in any documents."
+
+        report = []
+        report.append("=" * 80)
+        report.append("🚨 TAX ALERT REPORT")
+        report.append("=" * 80)
+
+        report.append(f"⚠️  FLAGGED CLIENTS: {len(self.tax_alerts)}")
+        report.append(f"🔍 Keywords scanned: TOOLS, ALCOHOL, NEW")
+        report.append(f"📄 Scan area: All pages after page 12 (manifest section)")
+        report.append("")
+
+        for alert in self.tax_alerts:
+            report.append(f"🚨 {alert['client_name']} ({alert['client_ref']})")
+            report.append("-" * 60)
+
+            for keyword_alert in alert['alerts']:
+                report.append(f"   • {keyword_alert['keyword']} found on page {keyword_alert['page']}")
+                report.append(f"     Context: \"{keyword_alert['context']}\"")
+            report.append("")
+
+        return "\n".join(report)
+
+    def save_reports_to_file(self, output_folder):
+        """
+        Save both reports to text files
+        """
+        try:
+            # Compression Report
+            compression_report_path = Path(output_folder) / "compression_report.txt"
+            with open(compression_report_path, 'w', encoding='utf-8') as f:
+                f.write(self.generate_compression_report())
+            self.logger.info(f"📊 Compression report saved: {compression_report_path}")
+
+            # Tax Alert Report
+            tax_report_path = Path(output_folder) / "tax_alert_report.txt"
+            with open(tax_report_path, 'w', encoding='utf-8') as f:
+                f.write(self.generate_tax_alert_report())
+            self.logger.info(f"🚨 Tax alert report saved: {tax_report_path}")
+
+            return compression_report_path, tax_report_path
+
+        except Exception as e:
+            self.logger.error(f"Failed to save reports: {e}")
+            return None, None
+
+    def process_multi_client_document(self, pdf_path, doc_type):
+        """Process multi-client documents (Advice of Arrivals, Bills of Lading)"""
+        self.logger.info(f"Processing {doc_type}: {pdf_path.name}")
         
         try:
-            doc = fitz.open(reference_path)
-            manifest_data = {}
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
             
-            # Process each page of the reference document
-            for page_num in range(len(doc)):
+            # Process each page to find client references
+            for page_num in range(total_pages):
                 page = doc[page_num]
                 text = page.get_text()
                 
-                # Extract all client entries from this page
-                clients_on_page = self.extract_clients_from_reference_page(text)
+                # Look for reference patterns in the text
+                ref_patterns = [
+                    r'(\d{3}[-/]\d{3}[-/]\d{3})',  # 000-000-000 or 000/000/000
+                    r'(\d{3}\s+\d{3}\s+\d{3})',   # 000 000 000
+                ]
                 
-                for consignee_ref, name in clients_on_page:
-                    if consignee_ref and name:
-                        manifest_data[consignee_ref] = name
-                        self.logger.debug(f"Found: {consignee_ref} -> {name}")
-            
-            doc.close()
-            
-            # Save to CSV file
-            csv_path = "client_manifest.csv"
-            with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(['ConsigneeRef', 'FullName'])  # Header
-                
-                for ref, name in sorted(manifest_data.items()):
-                    writer.writerow([ref, name])
-            
-            self.logger.info(f"Created manifest CSV with {len(manifest_data)} clients: {csv_path}")
-            
-            # Load the created manifest into memory
-            self.manifest = manifest_data
-            
-        except Exception as e:
-            self.logger.error(f"Error creating manifest from reference: {e}")
-    
-    def extract_clients_from_reference_page(self, text):
-        """Extract client info from reference document page"""
-        clients = []
-        
-        # Split text into lines and look for client entries
-        lines = text.split('\n')
-        
-        current_ref = None
-        current_name = None
-        
-        for i, line in enumerate(lines):
-            line = line.strip()
-            
-            # Look for customer reference pattern
-            ref_match = re.search(r'Cust Ref:\s*(\d{3}/\d{3}/\d{3})', line)
-            if ref_match:
-                current_ref = ref_match.group(1)
-                continue
-            
-            # Look for name pattern (usually appears after "Name:" field)
-            name_match = re.search(r'Name:\s*([A-Z][a-z]+ (?:[A-Z][a-z]+ )*[A-Z][a-z]+)', line)
-            if name_match and current_ref:
-                current_name = name_match.group(1).strip()
-                
-                # Validate the name
-                if self.is_valid_name(current_name):
-                    clients.append((current_ref, current_name))
-                    current_ref = None  # Reset for next client
-                    current_name = None
-        
-        return clients
-    
-    def load_manifest(self, manifest_file):
-        """Load client manifest from CSV file"""
-        manifest_path = Path(manifest_file)
-        if not manifest_path.exists():
-            self.logger.warning(f"No existing manifest file found: {manifest_file}")
-            return
-        
-        try:
-            self.logger.info(f"Loading existing manifest from: {manifest_file}")
-            with open(manifest_path, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                next(reader)  # Skip header
-                
-                for row in reader:
-                    if len(row) >= 2:
-                        consignee_ref = row[0].strip()
-                        full_name = row[1].strip()
-                        self.manifest[consignee_ref] = full_name
+                for pattern in ref_patterns:
+                    matches = re.findall(pattern, text)
+                    for match in matches:
+                        # Normalize reference format
+                        ref_normalized = match.replace('-', '/').replace(' ', '/')
                         
-            self.logger.info(f"Loaded {len(self.manifest)} clients from manifest")
-        except Exception as e:
-            self.logger.error(f"Error loading manifest: {e}")
-    
-    def get_name_from_manifest(self, consignee_ref):
-        """Get name from manifest if available"""
-        return self.manifest.get(consignee_ref)
-    
-    def extract_text_from_page(self, doc, page_num):
-        """Extract text from a specific page"""
-        try:
-            page = doc[page_num]
-            return page.get_text()
-        except:
-            return ""
-    
-    def find_client_info_on_page(self, text):
-        """Extract consignee reference and match against EDI manifest ONLY"""
-        # Find consignee reference in text
-        ref_patterns = [
-            r'(\d{3}/\d{3}/\d{3})',  # 000/531/023
-            r'(\d{3}-\d{3}-\d{3})',  # 000-531-023
-        ]
-        
-        for pattern in ref_patterns:
-            matches = re.findall(pattern, text)
-            for match in matches:
-                # Normalize reference format
-                normalized_ref = match.replace('-', '/')
-                
-                # Check if this reference exists in EDI manifest
-                if normalized_ref in self.manifest:
-                    consignee_ref = normalized_ref
-                    full_name = self.manifest[normalized_ref]
-                    return consignee_ref, full_name
-        
-        # No EDI match found
-        return None, None
-    
-    def is_valid_name(self, name):
-        """Check if extracted text is a valid person name"""
-        if not name:
-            return False
-        
-        # Clean up the name
-        name_cleaned = re.sub(r'\s+', ' ', name.strip())
-        
-        # Must have at least 2 words
-        words = name_cleaned.split()
-        if len(words) < 2:
-            return False
-        
-        # Exclude common business/location terms
-        exclude_terms = [
-            'Seven Seas', 'Hong Kong', 'Dublin Port', 'Advice of', 'Bill of',
-            'Ever Gain', 'Notify Party', 'New South', 'Old Hospital', 
-            'Little Lonsdale', 'Maunganui Road', 'Grange Manor'
-        ]
-        
-        if any(term in name_cleaned for term in exclude_terms):
-            return False
-        
-        # Skip if contains numbers or common non-name words
-        if re.search(r'\d|Street|Road|Avenue|Building|Plaza|Unit|Apartment|House|Court|Park|Lane|Drive', name_cleaned):
-            return False
-        
-        # Check if it looks like a real person's name
-        for word in words:
-            if len(word) == 0:
-                continue
-            if not (word[0].isupper() and (word[1:].islower() or "'" in word)):
-                return False
-        
-        return True
-    
-    def process_multi_client_document(self, pdf_path, doc_type):
-        """Process Advice of Arrivals or Bills of Lading"""
-        self.logger.info(f"Processing Multi-Client Document: {pdf_path.name}")
-        
-        doc = fitz.open(pdf_path)
-        total_pages = len(doc)
-        self.logger.info(f"Document has {total_pages} pages")
-        
-        # Analyze each page to find which client it belongs to
-        for page_num in range(total_pages):
-            text = self.extract_text_from_page(doc, page_num)
-            consignee_ref, full_name = self.find_client_info_on_page(text)
+                        # Check if this reference exists in our EDI manifest
+                        if ref_normalized in self.manifest:
+                            client_name = self.manifest[ref_normalized]
+                            self.logger.info(f"{doc_type}: Found {ref_normalized} - {client_name} on page {page_num + 1}")
+                            
+                            # Store page info for this client
+                            if not self.clients[ref_normalized]['info']:
+                                self.clients[ref_normalized]['info'] = (ref_normalized, client_name)
+                            
+                            self.clients[ref_normalized]['pages'].append({
+                                'page_num': page_num,
+                                'doc_type': doc_type,
+                                'doc_obj': doc
+                            })
+                            break  # Only match once per page
             
-            if consignee_ref and full_name:
-                self.logger.info(f"Page {page_num + 1}: {consignee_ref} - {full_name}")
-                
-                # Store client info and page reference
-                client_key = consignee_ref
-                if not self.clients[client_key]['info']:
-                    self.clients[client_key]['info'] = (consignee_ref, full_name)
-                
-                # Add this page to the client's collection
-                self.clients[client_key]['pages'].append({
-                    'source_doc': pdf_path,
-                    'page_num': page_num,
-                    'doc_type': doc_type,
-                    'doc_obj': doc
-                })
-            else:
-                self.logger.warning(f"Page {page_num + 1}: Could not identify client")
-        
-        return doc
-    
+            return doc
+            
+        except Exception as e:
+            self.logger.error(f"Error processing {doc_type} {pdf_path.name}: {e}")
+            return None
+
     def process_customer_document_edi_first(self, pdf_path):
         """Process individual customer document using EDI-first matching"""
         self.logger.info(f"Processing Customer Document: {pdf_path.name}")
-        
+
         # First, try to extract reference from filename
         filename = pdf_path.name
         ref_match = re.search(r'(\d{3}[-/]\d{3}[-/]\d{3})', filename)
         
-        doc = fitz.open(pdf_path)
-        
-        if ref_match:
-            file_ref = ref_match.group(1).replace('-', '/')
+        try:
+            doc = fitz.open(pdf_path)
             
-            # Check if this reference exists in EDI manifest
-            if file_ref in self.manifest:
-                client_name = self.manifest[file_ref]
-                self.logger.info(f"Customer Doc: {file_ref} - {client_name} (EDI match)")
+            if ref_match:
+                file_ref = ref_match.group(1).replace('-', '/')
                 
-                # Store customer document info
-                if not self.clients[file_ref]['info']:
-                    self.clients[file_ref]['info'] = (file_ref, client_name)
-                
-                # Add all pages of customer document to this client
-                for page_num in range(len(doc)):
-                    self.clients[file_ref]['pages'].append({
-                        'source_doc': pdf_path,
-                        'page_num': page_num,
-                        'doc_type': 'Customer Document',
-                        'doc_obj': doc
-                    })
-                
-                return doc
-        
-        # If filename didn't work, scan document content for EDI references
-        text = ""
-        for page in doc:
-            text += page.get_text()
-        
-        # Look for any EDI reference in the document text
-        for edi_ref in self.manifest.keys():
-            if edi_ref in text or edi_ref.replace('/', '-') in text:
-                client_name = self.manifest[edi_ref]
-                self.logger.info(f"Customer Doc: {edi_ref} - {client_name} (EDI content match)")
-                
-                if not self.clients[edi_ref]['info']:
-                    self.clients[edi_ref]['info'] = (edi_ref, client_name)
-                
-                for page_num in range(len(doc)):
-                    self.clients[edi_ref]['pages'].append({
-                        'source_doc': pdf_path,
-                        'page_num': page_num,
-                        'doc_type': 'Customer Document',
-                        'doc_obj': doc
-                    })
-                
-                return doc
-        
-        # Document doesn't match any EDI reference
-        self.logger.warning(f"Customer document {pdf_path.name} does not match any EDI reference - skipping")
-        doc.close()
-        return None
-    
+                # Check if this reference exists in EDI manifest
+                if file_ref in self.manifest:
+                    client_name = self.manifest[file_ref]
+                    self.logger.info(f"Customer Doc: {file_ref} - {client_name} (EDI match)")
+                    
+                    # Store customer document info
+                    if not self.clients[file_ref]['info']:
+                        self.clients[file_ref]['info'] = (file_ref, client_name)
+                    
+                    # Add all pages of this document
+                    for page_num in range(len(doc)):
+                        self.clients[file_ref]['pages'].append({
+                            'page_num': page_num,
+                            'doc_type': 'Customer Document',
+                            'doc_obj': doc
+                        })
+                    
+                    return doc
+            
+            # If filename didn't work, scan document content for EDI references
+            text = ""
+            for page in doc:
+                text += page.get_text()
+            
+            # Look for any EDI reference in the document text
+            for edi_ref in self.manifest.keys():
+                if edi_ref in text or edi_ref.replace('/', '-') in text:
+                    client_name = self.manifest[edi_ref]
+                    self.logger.info(f"Customer Doc: {edi_ref} - {client_name} (EDI content match)")
+                    
+                    if not self.clients[edi_ref]['info']:
+                        self.clients[edi_ref]['info'] = (edi_ref, client_name)
+                    
+                    for page_num in range(len(doc)):
+                        self.clients[edi_ref]['pages'].append({
+                            'page_num': page_num,
+                            'doc_type': 'Customer Document',
+                            'doc_obj': doc
+                        })
+                    
+                    return doc
+            
+            # Document doesn't match any EDI reference
+            self.logger.warning(f"Customer document {pdf_path.name} does not match any EDI reference - skipping")
+            doc.close()
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error processing customer document {pdf_path.name}: {e}")
+            return None
+
     def merge_client_documents(self, client_key, client_data):
-        """Merge all documents for a specific client with optimization"""
+        """Merge all documents for a specific client with optimization and tax scanning"""
         consignee_ref, full_name = client_data['info']
         if not consignee_ref:
             self.logger.error(f"Missing consignee reference for {client_key}")
             return False
-        
+
         # If no name, create a default one
         if not full_name:
             full_name = f"Client_{consignee_ref.replace('/', '_')}"
-        
+
         self.logger.info(f"Merging documents for: {consignee_ref} - {full_name}")
-        
+
         # Group pages by document type
         advice_pages = []
         bill_pages = []
         customer_pages = []
-        
+
         for page_info in client_data['pages']:
             if page_info['doc_type'] == 'Advice of Arrivals':
                 advice_pages.append(page_info)
@@ -471,72 +470,89 @@ class PDFMerger:
                 bill_pages.append(page_info)
             elif page_info['doc_type'] == 'Customer Document':
                 customer_pages.append(page_info)
-        
+
         self.logger.info(f"Found: {len(advice_pages)} Advice pages, {len(bill_pages)} Bill pages, {len(customer_pages)} Customer pages")
-        
+
         # Create merged PDF in correct order: Advice → Bills → Customer
         merged_doc = fitz.open()  # Create new empty document
-        
+
         # Add pages in order
         for page_info in advice_pages:
             source_doc = page_info['doc_obj']
             page_num = page_info['page_num']
             merged_doc.insert_pdf(source_doc, from_page=page_num, to_page=page_num)
-        
+
         for page_info in bill_pages:
             source_doc = page_info['doc_obj']
             page_num = page_info['page_num']
             merged_doc.insert_pdf(source_doc, from_page=page_num, to_page=page_num)
-        
+
         for page_info in customer_pages:
             source_doc = page_info['doc_obj']
             page_num = page_info['page_num']
             merged_doc.insert_pdf(source_doc, from_page=page_num, to_page=page_num)
-        
+
         # Save merged document
-        safe_ref = consignee_ref.replace('/', '-')
-        safe_name = re.sub(r'[^\w\s-]', '', full_name).strip()
-        
-        output_filename = f"{safe_name}_{safe_ref}.pdf"
+        safe_ref = consignee_ref.replace('/', '_')
+        safe_name = re.sub(r'[<>:"/\\|?*]', '_', full_name)
+        output_filename = f"{safe_ref}_{safe_name}.pdf"
         output_path = self.output_folder / output_filename
-        
-        # Save initial merged document
-        merged_doc.save(str(output_path))
-        merged_doc.close()
-        
-        total_pages = len(advice_pages) + len(bill_pages) + len(customer_pages)
-        self.logger.info(f"✅ Merged: {output_filename} ({total_pages} pages)")
-        
-        # Apply optimization if enabled
-        if self.enable_optimization:
-            try:
-                self.logger.info(f"🗜️ Optimizing: {output_filename}")
-                optimization_result = self.optimizer.optimize_pdf(output_path)
+
+        # NEW: Scan for tax keywords before saving
+        self.scan_for_tax_keywords(merged_doc, full_name, consignee_ref)
+
+        try:
+            # Save the merged document
+            merged_doc.save(output_path)
+            original_size = output_path.stat().st_size / (1024 * 1024)  # MB
+            
+            # Optimize if enabled
+            if self.enable_optimization:
+                self.logger.info(f"Optimizing merged document: {output_filename}")
                 
-                if optimization_result['optimized']:
-                    self.logger.info(f"   Optimized: {optimization_result['original_size_mb']:.2f}MB → "
-                                  f"{optimization_result['final_size_mb']:.2f}MB "
-                                  f"(saved {optimization_result['savings_mb']:.2f}MB)")
+                # FIXED: Get the optimization result as a dictionary
+                optimization_result = self.optimizer.optimize_pdf(str(output_path), str(output_path))
+                
+                if optimization_result and optimization_result.get('optimized'):
+                    # Extract the final size from the result dictionary
+                    final_size = optimization_result['final_size_mb']
+                    savings = optimization_result['savings_mb']
                     
-                    # Update optimization statistics
+                    # Update optimization stats
                     self.optimization_stats['files_optimized'] += 1
-                    self.optimization_stats['total_savings_mb'] += optimization_result['savings_mb']
+                    self.optimization_stats['total_savings_mb'] += savings
                     
-                    # Update average compression ratio
-                    files_count = self.optimization_stats['files_optimized']
-                    current_avg = self.optimization_stats['average_compression_ratio']
-                    new_ratio = optimization_result['compression_ratio']
-                    self.optimization_stats['average_compression_ratio'] = (
-                        (current_avg * (files_count - 1) + new_ratio) / files_count
-                    )
+                    # Store compression data for reporting
+                    self.compression_report.append({
+                        'filename': output_filename,
+                        'original_size_mb': optimization_result['original_size_mb'],
+                        'final_size_mb': final_size,
+                        'savings_mb': savings
+                    })
+                    
+                    self.logger.info(f"✅ Saved merged document: {output_filename} ({final_size:.2f}MB, saved {savings:.2f}MB)")
+                
+                elif optimization_result:
+                    # File didn't need optimization (already small enough)
+                    final_size = optimization_result['final_size_mb']
+                    self.logger.info(f"✅ Saved merged document: {output_filename} ({final_size:.2f}MB, no optimization needed)")
+                    
                 else:
-                    self.logger.info(f"   No optimization needed: {optimization_result['reason']}")
-                    
-            except Exception as e:
-                self.logger.warning(f"   ⚠️ Optimization failed: {str(e)}")
-        
-        return True
-    
+                    # Optimization failed
+                    self.logger.warning(f"Optimization failed for {output_filename}, keeping original")
+                    final_size = original_size
+            else:
+                final_size = original_size
+                self.logger.info(f"✅ Saved merged document: {output_filename} ({final_size:.2f}MB)")
+            
+            merged_doc.close()
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error saving merged document for {consignee_ref}: {e}")
+            merged_doc.close()
+            return False
+
     def process_all_documents(self):
         """Main process: analyze all PDFs and merge by EDI client list ONLY"""
         pdf_files = list(self.input_folder.glob("*.pdf"))
@@ -544,7 +560,7 @@ class PDFMerger:
         if not pdf_files:
             self.logger.error("No PDF files found!")
             return
-        
+                
         # CRITICAL: Only proceed if we have an EDI manifest
         if not self.manifest:
             self.logger.error("No EDI manifest loaded! Cannot process without client list.")
@@ -596,8 +612,29 @@ class PDFMerger:
         for doc in opened_docs:
             doc.close()
         
+        # Update average compression ratio
+        if self.enable_optimization and self.optimization_stats['files_optimized'] > 0:
+            total_original = sum(item['original_size_mb'] for item in self.compression_report)
+            total_final = sum(item['final_size_mb'] for item in self.compression_report)
+            self.optimization_stats['average_compression_ratio'] = total_original / total_final if total_final > 0 else 1
+        
+        # NEW: Generate and save reports
+        self.logger.info("📊 Generating reports...")
+        
+        # Print reports to console
+        print("\n" + self.generate_compression_report())
+        print("\n" + self.generate_tax_alert_report())
+        
+        # Save reports to files
+        compression_file, tax_file = self.save_reports_to_file(self.output_folder)
+        
         self.logger.info(f"✅ Process complete! Check the '{self.output_folder.name}' folder for merged PDFs.")
         self.logger.info(f"📊 EDI clients: {len(self.manifest)} | Processed: {edi_clients_processed}")
+        
+        if self.tax_alerts:
+            self.logger.warning(f"🚨 TAX ALERTS: {len(self.tax_alerts)} clients flagged for review!")
+        else:
+            self.logger.info("✅ No tax-relevant keywords found.")
 
 def parse_command_line():
     """Parse command line arguments with optimization options"""
@@ -605,35 +642,36 @@ def parse_command_line():
     
     # Required arguments
     parser.add_argument('--input-folder', required=True,
-                       help='Folder containing PDF files to merge')
+                    help='Folder containing PDF files to merge')
     parser.add_argument('--output-folder', required=True,
-                       help='Folder to save merged PDF files')
+                    help='Folder to save merged PDF files')
     
     # Optional arguments for manifest
     parser.add_argument('--edi-file',
-                       help='EDI Excel file (.xls or .xlsx) for client manifest')
+                    help='EDI Excel file (.xls or .xlsx) for client manifest')
     parser.add_argument('--reference-doc',
-                       help='Reference PDF document to extract client manifest')
+                    help='Reference PDF document to extract client manifest')
     parser.add_argument('--manifest-file',
-                       help='Existing CSV manifest file')
+                    help='Existing CSV manifest file')
     
     # Optimization options
     parser.add_argument('--enable-optimization', action='store_true', default=True,
-                       help='Enable PDF optimization (default: enabled)')
+                    help='Enable PDF optimization (default: enabled)')
     parser.add_argument('--disable-optimization', action='store_true',
-                       help='Disable PDF optimization')
+                    help='Disable PDF optimization')
     parser.add_argument('--target-size', type=float, default=1.2,
-                       help='Target file size in MB (default: 1.2)')
+                    help='Target file size in MB (default: 1.2)')
     parser.add_argument('--quality', type=int, default=85,
-                       help='Image quality 0-100 (default: 85)')
+                    help='Image quality 0-100 (default: 85)')
     
     # Optional settings
     parser.add_argument('--job-id',
-                       help='Job ID for web application processing')
+                    help='Job ID for web application processing')
     parser.add_argument('--json-output', action='store_true',
-                       help='Output results as JSON (for web application)')
+                    help='Output results as JSON (for web application)')
     
     return parser.parse_args()
+
 
 if __name__ == "__main__":
     # Parse command line arguments
@@ -702,7 +740,7 @@ if __name__ == "__main__":
                 print(f"   Total space saved: {opt_stats['total_savings_mb']:.2f} MB")
                 if opt_stats['files_optimized'] > 0:
                     print(f"   Average compression: {opt_stats['average_compression_ratio']:.2f}x")
-            
+        
         logger.info("=== PDF Merger Completed Successfully ===")
     
     except Exception as e:
