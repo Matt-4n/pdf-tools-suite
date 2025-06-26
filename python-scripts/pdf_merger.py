@@ -187,10 +187,23 @@ class PDFMerger:
         pass
 
     def load_manifest(self, manifest_file):
-        """Load existing CSV manifest - placeholder implementation"""
+        """Load existing CSV manifest"""
         self.logger.info(f"Loading manifest from file: {manifest_file}")
-        # TODO: Implement this method if needed
-        pass
+        try:
+            import csv
+            with open(manifest_file, 'r', newline='', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    ref = row.get('ConsigneeRef', '').strip()
+                    name = row.get('FullName', '').strip()
+                    if ref and name:
+                        self.manifest[ref] = name
+                        self.logger.info(f"Loaded client: {ref} -> {name}")
+            
+            self.logger.info(f"Successfully loaded {len(self.manifest)} clients from manifest")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load manifest: {e}")
 
     def scan_for_tax_keywords(self, doc, client_name, client_ref):
         """
