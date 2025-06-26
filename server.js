@@ -1,4 +1,5 @@
 
+const { spawn } = require('child_process');
 const { performance } = require('perf_hooks');
 const express = require('express');
 const multer = require('multer');
@@ -536,26 +537,75 @@ app.post('/api/merger/process', async (req, res) => {
             pythonOptions.args.push('--edi-file', files.ediFile.path);
         }
 
-        logger.info('Running Python merger...');
+      logger.info('Running Python merger with child_process...');
+
+        const pythonArgs = [
+            'python-scripts/pdf_merger.py',
+            '--input-folder', 'merger-uploads',
+            '--output-folder', outputDir,
+            '--job-id', jobId,
+            '--json-output'
+        ];
+
+        if (manifestPath && await fs.pathExists(manifestPath)) {
+            pythonArgs.push('--manifest-file', manifestPath);
+        }
+
+        if (files.ediFile && await fs.pathExists(files.ediFile.path)) {
+            pythonArgs.push('--edi-file', files.ediFile.path);
+        }
+
+        logger.info('Python command:', pythonArgs.join(' '));
+
         const mergerResults = await new Promise((resolve, reject) => {
-            PythonShell.run('pdf_merger.py', pythonOptions, (err, results) => {
-                if (err) {
-                    logger.error('Python merger error:', err);
-                    reject(err);
+            const python = spawn('./.venv/bin/python', pythonArgs);
+            
+            let stdout = '';
+            let stderr = '';
+            
+            python.stdout.on('data', (data) => {
+                const output = data.toString();
+                stdout += output;
+                logger.info('Python stdout:', output.trim());
+            });
+            
+            python.stderr.on('data', (data) => {
+                const error = data.toString();
+                stderr += error;
+                logger.error('Python stderr:', error.trim());
+            });
+            
+            python.on('close', (code) => {
+                logger.info(`Python process finished with code: ${code}`);
+                
+                if (code !== 0) {
+                    reject(new Error(`Python script failed with code ${code}: ${stderr}`));
                 } else {
-                    try {
-                        const lastLine = results[results.length - 1];
-                        const result = JSON.parse(lastLine);
-                        resolve(result);
-                    } catch (parseErr) {
-                        logger.error('Failed to parse merger results:', parseErr);
-                        resolve({
-                            success: true,
-                            message: 'Merging completed, but could not parse detailed results'
-                        });
+                    // Find JSON output in stdout
+                    const lines = stdout.split('\n');
+                    const jsonLine = lines.find(line => line.trim().startsWith('{'));
+                    
+                    if (jsonLine) {
+                        try {
+                            const result = JSON.parse(jsonLine);
+                            logger.info('Parsed Python result:', result);
+                            resolve(result);
+                        } catch (e) {
+                            logger.error('JSON parse error:', e);
+                            resolve({ success: true, message: 'Completed but parse failed' });
+                        }
+                    } else {
+                        logger.warning('No JSON output found');
+                        resolve({ success: true, message: 'Completed successfully' });
                     }
                 }
             });
+            
+            // Add timeout
+            setTimeout(() => {
+                python.kill();
+                reject(new Error('Python process timeout'));
+            }, 5 * 60 * 1000); // 5 minute timeout
         });
 
         // Step 2: Apply page 9 overlays if requested
@@ -573,7 +623,6 @@ app.post('/api/merger/process', async (req, res) => {
 
             // And replace with (since you already imported it at the top):
             const overlayProcessor = new TextOverlayProcessor();
-                const processor = new TextOverlayProcessor();
                 
                 // Extract shipment data from the first PDF file
                 const firstPdfPath = path.join(outputDir, pdfFiles[0]);
@@ -621,11 +670,18 @@ app.post('/api/merger/process', async (req, res) => {
         
         res.json({
             success: true,
-            ...mergerResults,
+            jobId: jobId,
+            downloadUrl: `/api/merger/download/${jobId}`,
+            stats: {
+                merged_clients: mergerResults.stats?.merged_clients || mergerResults.merged_clients || 0,
+                processed_files: mergerResults.stats?.processed_files || mergerResults.processed_files || 0,
+                overlays_applied: mergerResults.overlaysApplied || 0
+            },
             performance: {
                 duration: completedJob.duration,
-                filesPerSecond: (mergerResults.stats?.processed_files || 0) / (completedJob.duration / 1000)
-            }
+                filesPerSecond: (mergerResults.stats?.processed_files || mergerResults.stats?.processed || 0) / (completedJob.duration / 1000)
+            },
+            originalResults: mergerResults  // Keep full results for debugging
         });
 
     } catch (error) {
