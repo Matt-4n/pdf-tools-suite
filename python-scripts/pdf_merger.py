@@ -1,1255 +1,1111 @@
-
-const { spawn } = require('child_process');
-const { performance } = require('perf_hooks');
-const express = require('express');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs-extra');
-const cors = require('cors');
-const archiver = require('archiver');
-const { v4: uuidv4 } = require('uuid');
-const cron = require('node-cron');
-const winston = require('winston');
-const helmet = require('helmet');
-const compression = require('compression');
-const rateLimit = require('express-rate-limit');
-const { PythonShell } = require('python-shell');
-const XLSX = require('xlsx');
-const csv = require('csv-parser');
-const createCsvWriter = require('csv-writer').createObjectCsvWriter;
-
-// Import your text overlay processor
-const TextOverlayProcessor = require('./textOverlay.js');
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Constants
-const SIGNATURE_PATH = './signatures/default-signature.png';
-
-// Simple Performance Monitor Class (keeping your existing implementation)
-class SimplePerformanceMonitor {
-    constructor() {
-        this.metrics = {
-            totalRequests: 0,
-            successfulRequests: 0,
-            failedRequests: 0,
-            totalProcessingTime: 0,
-            averageProcessingTime: 0,
-            mergerJobs: 0,
-            formProcessorJobs: 0,
-            startTime: Date.now(),
-            errors: []
-        };
-        
-        this.activeJobs = new Map();
-    }
-    
-    startJob(jobType, jobId, details = {}) {
-        const job = {
-            type: jobType,
-            id: jobId,
-            startTime: performance.now(),
-            details,
-            status: 'running'
-        };
-        
-        this.activeJobs.set(jobId, job);
-        console.log(`📊 Started ${jobType} job: ${jobId}`);
-        
-        return job;
-    }
-    
-    completeJob(jobId, result = {}) {
-        const job = this.activeJobs.get(jobId);
-        if (!job) return null;
-        
-        const duration = performance.now() - job.startTime;
-        job.duration = duration;
-        job.status = 'completed';
-        job.result = result;
-        
-        this.metrics.totalRequests++;
-        this.metrics.successfulRequests++;
-        this.metrics.totalProcessingTime += duration;
-        this.metrics.averageProcessingTime = this.metrics.totalProcessingTime / this.metrics.successfulRequests;
-        
-        if (job.type === 'merger') {
-            this.metrics.mergerJobs++;
-        } else if (job.type === 'form-processor') {
-            this.metrics.formProcessorJobs++;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Processor & Merger Suite</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-        
-        this.activeJobs.delete(jobId);
-        
-        console.log(`✅ Completed ${job.type} job: ${jobId} (${duration.toFixed(2)}ms)`);
-        return job;
-    }
-    
-    failJob(jobId, error) {
-        const job = this.activeJobs.get(jobId);
-        if (!job) return null;
-        
-        const duration = performance.now() - job.startTime;
-        job.duration = duration;
-        job.status = 'failed';
-        job.error = error.message || error;
-        
-        this.metrics.totalRequests++;
-        this.metrics.failedRequests++;
-        
-        this.metrics.errors.push({
-            jobId,
-            type: job.type,
-            error: job.error,
-            timestamp: new Date().toISOString()
-        });
-        
-        if (this.metrics.errors.length > 50) {
-            this.metrics.errors = this.metrics.errors.slice(-50);
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
         }
-        
-        this.activeJobs.delete(jobId);
-        
-        console.log(`❌ Failed ${job.type} job: ${jobId} - ${job.error}`);
-        return job;
-    }
-    
-    getMetrics() {
-        const uptime = Date.now() - this.metrics.startTime;
-        const successRate = this.metrics.totalRequests > 0 ? 
-            (this.metrics.successfulRequests / this.metrics.totalRequests * 100).toFixed(2) : 0;
-        
-        return {
-            ...this.metrics,
-            uptime: uptime,
-            uptimeHours: (uptime / (1000 * 60 * 60)).toFixed(2),
-            successRate: `${successRate}%`,
-            activeJobs: this.activeJobs.size,
-            currentTime: new Date().toISOString()
-        };
-    }
-    
-    getHealthStatus() {
-        const metrics = this.getMetrics();
-        const recentErrors = this.metrics.errors.filter(
-            error => Date.now() - new Date(error.timestamp).getTime() < 60000
-        );
-        
-        const isHealthy = recentErrors.length === 0 && parseFloat(metrics.successRate) > 95;
-        
-        return {
-            status: isHealthy ? 'healthy' : 'degraded',
-            uptime: metrics.uptimeHours + ' hours',
-            successRate: metrics.successRate,
-            activeJobs: metrics.activeJobs,
-            recentErrors: recentErrors.length,
-            lastCheck: new Date().toISOString()
-        };
-    }
-}
 
-// Create global performance monitor
-const performanceMonitor = new SimplePerformanceMonitor();
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
 
-// Enhanced logging
-const logger = winston.createLogger({
-    level: 'info',
-    format: winston.format.combine(
-        winston.format.timestamp(),
-        winston.format.errors({ stack: true }),
-        winston.format.json()
-    ),
-    transports: [
-        new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
-        new winston.transports.File({ filename: 'logs/combined.log' }),
-        new winston.transports.Console({
-            format: winston.format.simple()
-        })
-    ]
-});
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            color: white;
+        }
 
-// Security and performance middleware
-app.use(helmet({
-    contentSecurityPolicy: false
-}));
-app.use(compression());
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+        .header h1 {
+            font-size: 3rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
 
-// Rate limiting
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100
-});
-app.use('/api/', limiter);
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
 
-// Ensure directories exist
-const ensureDirectories = async () => {
-    const dirs = [
-        'uploads', 'outputs', 'signatures', 'logs', 
-        'merger-uploads', 'merger-outputs', 'manifests'
-    ];
-    
-    for (const dir of dirs) {
-        await fs.ensureDir(dir);
-    }
-};
+        /* Navigation Tabs */
+        .nav-tabs {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 30px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 15px;
+            padding: 5px;
+            backdrop-filter: blur(10px);
+        }
 
-// Check signature file
-const ensureSignature = async () => {
-    if (!await fs.pathExists(SIGNATURE_PATH)) {
-        logger.warn(`⚠️  Default signature not found at: ${SIGNATURE_PATH}`);
-        console.log('📝 Place your signature image at:', SIGNATURE_PATH);
-        console.log('💡 Supported formats: PNG, JPG, GIF');
-    } else {
-        logger.info('✅ Default signature loaded');
-        console.log('✅ Default signature found');
-    }
-};
+        .nav-tab {
+            flex: 1;
+            max-width: 250px;
+            padding: 15px 25px;
+            text-align: center;
+            cursor: pointer;
+            border-radius: 10px;
+            transition: all 0.3s ease;
+            color: white;
+            font-weight: 600;
+            text-decoration: none;
+        }
 
-// Configure multer for different file types
-const createMulterStorage = (destination) => {
-    return multer({
-        storage: multer.diskStorage({
-            destination: (req, file, cb) => {
-                cb(null, destination);
-            },
-            filename: (req, file, cb) => {
-                const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-                cb(null, uniqueSuffix + '-' + file.originalname);
+        .nav-tab:hover {
+            background: rgba(255,255,255,0.2);
+            transform: translateY(-2px);
+        }
+
+        .nav-tab.active {
+            background: white;
+            color: #4f46e5;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+
+        /* Content Panels */
+        .content-panel {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.1);
+            padding: 40px;
+            display: none;
+        }
+
+        .content-panel.active {
+            display: block;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Form Processor Styles */
+        .step {
+            margin-bottom: 30px;
+            padding: 25px;
+            border: 2px dashed #e0e7ff;
+            border-radius: 15px;
+            transition: all 0.3s ease;
+        }
+
+        .step.active {
+            border-color: #4f46e5;
+            background: #f8faff;
+        }
+
+        .step-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .step-number {
+            background: #4f46e5;
+            color: white;
+            width: 35px;
+            height: 35px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 15px;
+        }
+
+        .step-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: #1f2937;
+        }
+
+        /* Upload Areas */
+        .upload-area {
+            border: 2px dashed #d1d5db;
+            border-radius: 10px;
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 20px;
+        }
+
+        .upload-area:hover {
+            border-color: #4f46e5;
+            background: #f8faff;
+        }
+
+        .upload-area.dragover {
+            border-color: #4f46e5;
+            background: #e0e7ff;
+        }
+
+        .upload-area.has-files {
+            border-color: #10b981;
+            background: #f0fdf4;
+        }
+
+        .upload-icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+            opacity: 0.6;
+        }
+
+        /* File Lists */
+        .file-list {
+            margin-top: 20px;
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 15px;
+            background: #f3f4f6;
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+
+        .file-info {
+            display: flex;
+            align-items: center;
+            flex: 1;
+        }
+
+        .file-name {
+            font-weight: 500;
+            margin-right: 10px;
+        }
+
+        .file-size {
+            color: #6b7280;
+            font-size: 0.9rem;
+        }
+
+        .remove-btn {
+            background: #ef4444;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            display: inline-block;
+            text-align: center;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+            color: white;
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+
+        .btn:disabled {
+            background: #9ca3af;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-block {
+            display: block;
+            width: 100%;
+            margin: 20px 0;
+        }
+
+        /* Progress */
+        .progress-container {
+            margin: 30px 0;
+            display: none;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e5e7eb;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #10b981, #059669);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            margin-top: 10px;
+            text-align: center;
+            color: #6b7280;
+        }
+
+        /* Results */
+        .results {
+            margin-top: 30px;
+            padding: 25px;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .results.success {
+            background: #f0fdf4;
+            border: 1px solid #bbf7d0;
+        }
+
+        .results.error {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+        }
+
+        /* Merger Specific Styles */
+        .upload-section {
+            margin-bottom: 30px;
+            padding: 25px;
+            border: 2px dashed #e0e7ff;
+            border-radius: 15px;
+            transition: all 0.3s ease;
+        }
+
+        .upload-section:hover {
+            border-color: #4f46e5;
+            background: #f8faff;
+        }
+
+        .upload-section.dragover {
+            border-color: #4f46e5;
+            background: #e0e7ff;
+            transform: scale(1.02);
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .section-icon {
+            font-size: 2rem;
+            margin-right: 15px;
+        }
+
+        .section-title {
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: #1f2937;
+        }
+
+        .section-subtitle {
+            color: #6b7280;
+            font-size: 0.9rem;
+            margin-top: 5px;
+        }
+
+        .upload-text {
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .upload-hint {
+            color: #6b7280;
+            font-size: 0.9rem;
+        }
+
+        .smart-corrections {
+            background: #fef3c7;
+            border: 1px solid #f59e0b;
+            border-radius: 10px;
+            padding: 15px;
+            margin: 20px 0;
+            display: none;
+        }
+
+        .smart-corrections.show {
+            display: block;
+        }
+
+        .corrections-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .corrections-icon {
+            font-size: 1.5rem;
+            margin-right: 10px;
+        }
+
+        .corrections-title {
+            font-weight: 600;
+            color: #92400e;
+        }
+
+        .correction-item {
+            color: #92400e;
+            font-size: 0.9rem;
+            margin-bottom: 5px;
+        }
+
+        .process-section {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 30px;
+            border-top: 2px solid #f3f4f6;
+        }
+
+        /* Overlay styles */
+        .overlay-controls {
+            background: #f8faff;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+
+        .overlay-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: white;
+            border-radius: 8px;
+            border: 1px solid #e5e7eb;
+        }
+
+        .overlay-item input[type="text"] {
+            flex: 1;
+            margin: 0 10px;
+            padding: 8px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+        }
+
+        .overlay-item button {
+            padding: 8px 15px;
+            background: #ef4444;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container {
+                padding: 10px;
             }
-        }),
-        limits: {
-            fileSize: 100 * 1024 * 1024 // 100MB limit
-        },
-        fileFilter: (req, file, cb) => {
-            const allowedTypes = /\.(pdf|xls|xlsx|png|jpg|jpeg|gif)$/i;
-            if (allowedTypes.test(file.originalname)) {
-                cb(null, true);
+            
+            .nav-tabs {
+                flex-direction: column;
+            }
+            
+            .nav-tab {
+                max-width: none;
+                margin-bottom: 5px;
+            }
+            
+            .content-panel {
+                padding: 20px;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🚀 PDF Tools Suite</h1>
+            <p>Professional PDF processing for shipping & customs</p>
+        </div>
+
+        <!-- Navigation -->
+        <div class="nav-tabs">
+            <div class="nav-tab active" onclick="switchPanel('processor')" id="processor-tab">
+                📝 Form Processor
+            </div>
+            <div class="nav-tab" onclick="switchPanel('merger')" id="merger-tab">
+                🚢 Document Merger
+            </div>
+        </div>
+
+        <!-- Form Processor Panel -->
+        <div class="content-panel active" id="processor-panel">
+            <div class="step active">
+                <div class="step-header">
+                    <div class="step-number">1</div>
+                    <div class="step-title">Upload PDF Forms</div>
+                </div>
+                <div class="upload-area" id="processor-upload">
+                    <div class="upload-icon">📄</div>
+                    <p><strong>Drop your PDF forms here</strong></p>
+                    <p>or click to browse files</p>
+                    <input type="file" id="processor-files" accept=".pdf" multiple style="display: none;">
+                </div>
+                <div class="file-list" id="processor-file-list"></div>
+            </div>
+
+            <div class="step">
+                <div class="step-header">
+                    <div class="step-number">2</div>
+                    <div class="step-title">Configure Text Overlays</div>
+                </div>
+                <div class="overlay-controls">
+                    <div id="overlay-list">
+                        <!-- Overlay items will be added here -->
+                    </div>
+                    <button class="btn btn-primary" onclick="addOverlay()">+ Add Text Overlay</button>
+                </div>
+            </div>
+
+            <button class="btn btn-success btn-block" id="process-forms-btn" onclick="processForms()" disabled>
+                🚀 Process Forms
+            </button>
+
+            <div class="progress-container" id="processor-progress">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="processor-progress-fill"></div>
+                </div>
+                <div class="progress-text" id="processor-progress-text">Processing...</div>
+            </div>
+
+            <div class="results" id="processor-results">
+                <div id="processor-results-content"></div>
+            </div>
+        </div>
+
+        <!-- Document Merger Panel -->
+        <div class="content-panel" id="merger-panel">
+            <!-- Smart Corrections Alert -->
+            <div class="smart-corrections" id="smart-corrections">
+                <div class="corrections-header">
+                    <span class="corrections-icon">🤖</span>
+                    <span class="corrections-title">Smart Detection Applied</span>
+                </div>
+                <div id="corrections-list">
+                    <!-- Corrections will be added here -->
+                </div>
+            </div>
+
+            <!-- Step 1: EDI File -->
+            <div class="upload-section">
+                <div class="section-header">
+                    <div class="section-icon">📊</div>
+                    <div>
+                        <div class="section-title">1. Upload EDI File</div>
+                        <div class="section-subtitle">Excel file containing client manifest (.xls or .xlsx)</div>
+                    </div>
+                </div>
+                <div class="upload-area" id="edi-upload" data-type="edi">
+                    <div class="upload-text">Drop EDI file here</div>
+                    <div class="upload-hint">or click to browse</div>
+                </div>
+                <div class="file-list" id="edi-files"></div>
+                <input type="file" id="edi-input" accept=".xls,.xlsx" style="display: none;">
+            </div>
+
+            <!-- Step 2: Advice of Arrival -->
+            <div class="upload-section">
+                <div class="section-header">
+                    <div class="section-icon">📋</div>
+                    <div>
+                        <div class="section-title">2. Upload Advice of Arrival</div>
+                        <div class="section-subtitle">Multi-client document that will be split automatically</div>
+                    </div>
+                </div>
+                <div class="upload-area" id="advice-upload" data-type="advice">
+                    <div class="upload-text">Drop Advice of Arrival PDF here</div>
+                    <div class="upload-hint">Document will be split by client reference</div>
+                </div>
+                <div class="file-list" id="advice-files"></div>
+                <input type="file" id="advice-input" accept=".pdf" style="display: none;">
+            </div>
+
+            <!-- Step 3: Bills & Customer Documents -->
+            <div class="upload-section">
+                <div class="section-header">
+                    <div class="section-icon">🚢</div>
+                    <div>
+                        <div class="section-title">3. Upload Bills of Lading & Customer Documents</div>
+                        <div class="section-subtitle">All other PDFs - will be grouped by client reference</div>
+                    </div>
+                </div>
+                <div class="upload-area" id="documents-upload" data-type="documents">
+                    <div class="upload-text">Drop all other PDF files here</div>
+                    <div class="upload-hint">Bills of Lading, Customer docs, etc.</div>
+                </div>
+                <div class="file-list" id="documents-files"></div>
+                <input type="file" id="documents-input" accept=".pdf" multiple style="display: none;">
+            </div>
+
+            <!-- Process Section -->
+            <div class="process-section">
+                <button class="btn btn-success" id="merger-process-btn" onclick="startMergerProcessing()" disabled>
+                    🚀 Merge Documents & Apply Page 9 Overlays
+                </button>
+                
+                <div class="progress-container" id="merger-progress">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="merger-progress-fill"></div>
+                    </div>
+                    <div class="progress-text" id="merger-progress-text">Processing...</div>
+                </div>
+
+                <div class="results" id="merger-results">
+                    <div id="merger-results-content"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global state for both panels
+        let processorFiles = [];
+        let processorOverlays = [];
+        
+        // Merger state
+        let mergerFiles = {
+            edi: [],
+            advice: [],
+            documents: []
+        };
+
+        // Panel switching
+        function switchPanel(panelName) {
+            // Update tabs
+            document.querySelectorAll('.nav-tab').forEach(tab => tab.classList.remove('active'));
+            document.getElementById(`${panelName}-tab`).classList.add('active');
+            
+            // Update panels
+            document.querySelectorAll('.content-panel').forEach(panel => panel.classList.remove('active'));
+            document.getElementById(`${panelName}-panel`).classList.add('active');
+        }
+
+        // ==================== FORM PROCESSOR LOGIC ====================
+        
+        // Initialize form processor uploads
+        function initProcessorUploads() {
+            const uploadArea = document.getElementById('processor-upload');
+            const fileInput = document.getElementById('processor-files');
+            
+            uploadArea.addEventListener('click', () => fileInput.click());
+            
+            uploadArea.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                uploadArea.classList.add('dragover');
+            });
+            
+            uploadArea.addEventListener('dragleave', () => {
+                uploadArea.classList.remove('dragover');
+            });
+            
+            uploadArea.addEventListener('drop', (e) => {
+                e.preventDefault();
+                uploadArea.classList.remove('dragover');
+                handleProcessorFiles(Array.from(e.dataTransfer.files));
+            });
+            
+            fileInput.addEventListener('change', (e) => {
+                handleProcessorFiles(Array.from(e.target.files));
+            });
+        }
+
+        function handleProcessorFiles(files) {
+            processorFiles = files;
+            updateProcessorFileList();
+            updateProcessorButton();
+        }
+
+        function updateProcessorFileList() {
+            const fileList = document.getElementById('processor-file-list');
+            
+            if (processorFiles.length > 0) {
+                fileList.innerHTML = processorFiles.map((file, index) => `
+                    <div class="file-item">
+                        <div class="file-info">
+                            <span class="file-name">${file.name}</span>
+                            <span class="file-size">(${formatFileSize(file.size)})</span>
+                        </div>
+                        <button class="remove-btn" onclick="removeProcessorFile(${index})">Remove</button>
+                    </div>
+                `).join('');
             } else {
-                cb(new Error('Only PDF, Excel, and image files are allowed'));
-            }
-        }
-    });
-};
-
-const uploadProcessor = createMulterStorage('uploads');
-const uploadMerger = createMulterStorage('merger-uploads');
-
-// Serve static files
-app.use(express.static('public'));
-
-// ==================== FORM PROCESSOR ROUTES ====================
-
-// Form processor upload endpoint
-app.post('/api/upload', uploadProcessor.array('files'), async (req, res) => {
-    try {
-        logger.info(`Form processor upload: ${req.files.length} files`);
-        
-        const processedFiles = req.files.map(file => ({
-            id: uuidv4(),
-            originalName: file.originalname,
-            filename: file.filename,
-            path: file.path,
-            size: file.size
-        }));
-
-        // Check if signature exists
-        const signatureExists = await fs.pathExists(SIGNATURE_PATH);
-
-        res.json({
-            success: true,
-            files: processedFiles,
-            signatureAvailable: signatureExists,
-            message: `Uploaded ${req.files.length} files successfully`
-        });
-    } catch (error) {
-        logger.error('Upload error:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Form processor process endpoint - NOW PROPERLY INTEGRATED
-app.post('/api/process', async (req, res) => {
-    const trackingJobId = `form_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const job = performanceMonitor.startJob('form-processor', trackingJobId, {
-        fileCount: req.body.files?.length || 0,
-        overlays: req.body.overlays?.length || 0
-    });
-
-    try {
-        const { files, overlays, settings } = req.body;
-        logger.info(`Processing ${files.length} files with form overlay`);
-
-        const jobId = uuidv4();
-        const outputDir = path.join('outputs', jobId);
-        await fs.ensureDir(outputDir);
-
-        // Initialize the text overlay processor
-        const processor = new TextOverlayProcessor();
-        
-        // Configure overlays if provided
-        if (overlays && overlays.length > 0) {
-            // Convert frontend overlay format to processor format
-            const overlayConfig = overlays.map(overlay => ({
-                name: overlay.name || 'customOverlay',
-                x: overlay.x || 100,
-                y: overlay.y || 100,
-                text: overlay.text || '',
-                description: overlay.description || 'Custom overlay'
-            }));
-            
-            // Update processor overlay configuration
-            processor.overlayConfig.fields = overlayConfig;
-        }
-
-        // Copy uploaded files to a temporary processing directory
-        const tempInputDir = path.join('uploads', 'temp_' + jobId);
-        await fs.ensureDir(tempInputDir);
-
-        const processedFiles = [];
-        for (const file of files) {
-            const originalPath = path.join('uploads', file.filename || file.originalName);
-            const tempPath = path.join(tempInputDir, file.originalName);
-            
-            if (await fs.pathExists(originalPath)) {
-                await fs.copy(originalPath, tempPath);
-                processedFiles.push({
-                    originalName: file.originalName,
-                    tempPath: tempPath
-                });
+                fileList.innerHTML = '';
             }
         }
 
-        // Process the PDFs using your existing textOverlay processor
-        const result = await processor.processBatch(tempInputDir, outputDir);
-
-        // Clean up temporary directory
-        await fs.remove(tempInputDir);
-
-        // Complete the performance tracking
-        const completedJob = performanceMonitor.completeJob(trackingJobId, result);
-
-        res.json({
-            success: true,
-            jobId: jobId,
-            processedFiles: result.successFiles || processedFiles,
-            downloadUrl: `/api/download/${jobId}`,
-            performance: {
-                duration: completedJob.duration,
-                filesPerSecond: (result.successful || 0) / (completedJob.duration / 1000)
-            },
-            stats: {
-                processed: result.processed || 0,
-                successful: result.successful || 0,
-                failed: result.failed || 0
-            }
-        });
-
-    } catch (error) {
-        performanceMonitor.failJob(trackingJobId, error);
-        logger.error('Form processing error:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// ==================== DOCUMENT MERGER ROUTES ====================
-
-// Upload files for merger
-app.post('/api/merger/upload', uploadMerger.fields([
-    { name: 'pdfFiles', maxCount: 50 },
-    { name: 'ediFile', maxCount: 1 },
-    { name: 'referenceDoc', maxCount: 1 }
-]), async (req, res) => {
-    try {
-        logger.info('Merger upload request received');
-        
-        const uploadedFiles = {
-            pdfFiles: [],
-            ediFile: null,
-            referenceDoc: null
-        };
-
-        if (req.files.pdfFiles) {
-            uploadedFiles.pdfFiles = req.files.pdfFiles.map(file => ({
-                id: uuidv4(),
-                originalName: file.originalname,
-                filename: file.filename,
-                path: file.path,
-                size: file.size
-            }));
+        function removeProcessorFile(index) {
+            processorFiles.splice(index, 1);
+            updateProcessorFileList();
+            updateProcessorButton();
         }
 
-        if (req.files.ediFile && req.files.ediFile[0]) {
-            const file = req.files.ediFile[0];
-            uploadedFiles.ediFile = {
-                id: uuidv4(),
-                originalName: file.originalname,
-                filename: file.filename,
-                path: file.path,
-                size: file.size
+        function updateProcessorButton() {
+            document.getElementById('process-forms-btn').disabled = processorFiles.length === 0;
+        }
+
+        // Overlay management
+        function addOverlay() {
+            const overlayId = Date.now();
+            const overlay = {
+                id: overlayId,
+                text: '',
+                x: 200,
+                y: 400,
+                page: 9,
+                fontSize: 11
             };
+            
+            processorOverlays.push(overlay);
+            renderOverlays();
         }
 
-        if (req.files.referenceDoc && req.files.referenceDoc[0]) {
-            const file = req.files.referenceDoc[0];
-            uploadedFiles.referenceDoc = {
-                id: uuidv4(),
-                originalName: file.originalname,
-                filename: file.filename,
-                path: file.path,
-                size: file.size
-            };
+        function removeOverlay(overlayId) {
+            processorOverlays = processorOverlays.filter(o => o.id !== overlayId);
+            renderOverlays();
         }
 
-        logger.info(`Merger upload successful: ${uploadedFiles.pdfFiles.length} PDFs, EDI: ${!!uploadedFiles.ediFile}`);
-
-        res.json({
-            success: true,
-            files: uploadedFiles,
-            message: 'Files uploaded successfully for merger'
-        });
-
-    } catch (error) {
-        logger.error('Merger upload error:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Process manifest from uploaded files
-app.post('/api/merger/process-manifest', async (req, res) => {
-    try {
-        const { ediFilePath, referenceDocPath } = req.body;
-        logger.info('Processing manifest from uploaded files');
-
-        let manifest = {};
-
-        if (ediFilePath && await fs.pathExists(ediFilePath)) {
-            manifest = await processEdiFile(ediFilePath);
-        } else if (referenceDocPath && await fs.pathExists(referenceDocPath)) {
-            manifest = await processReferenceDocument(referenceDocPath);
+        function renderOverlays() {
+            const overlayList = document.getElementById('overlay-list');
+            
+            overlayList.innerHTML = processorOverlays.map(overlay => `
+                <div class="overlay-item">
+                    <input type="text" placeholder="Text to add" value="${overlay.text}" 
+                           onchange="updateOverlay(${overlay.id}, 'text', this.value)">
+                    <input type="number" placeholder="X" value="${overlay.x}" style="width: 80px;"
+                           onchange="updateOverlay(${overlay.id}, 'x', this.value)">
+                    <input type="number" placeholder="Y" value="${overlay.y}" style="width: 80px;"
+                           onchange="updateOverlay(${overlay.id}, 'y', this.value)">
+                    <input type="number" placeholder="Page" value="${overlay.page}" style="width: 80px;"
+                           onchange="updateOverlay(${overlay.id}, 'page', this.value)">
+                    <button onclick="removeOverlay(${overlay.id})">Remove</button>
+                </div>
+            `).join('');
         }
 
-        const manifestId = uuidv4();
-        const manifestPath = path.join('manifests', `manifest_${manifestId}.csv`);
-        await saveManifestAsCsv(manifest, manifestPath);
-
-        res.json({
-            success: true,
-            manifest: manifest,
-            manifestId: manifestId,
-            manifestPath: manifestPath,
-            count: Object.keys(manifest).length
-        });
-
-    } catch (error) {
-        logger.error('Manifest processing error:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-
-
-// Download merged files
-app.get('/api/merger/download/:jobId', async (req, res) => {
-    try {
-        const { jobId } = req.params;
-        const outputDir = path.join('merger-outputs', jobId);
-
-        if (!await fs.pathExists(outputDir)) {
-            return res.status(404).json({ error: 'Job not found' });
-        }
-
-        const zipPath = path.join('merger-outputs', `${jobId}_merged.zip`);
-        const output = fs.createWriteStream(zipPath);
-        const archive = archiver('zip', { zlib: { level: 9 } });
-
-        archive.pipe(output);
-
-        const files = await fs.readdir(outputDir);
-        const pdfFiles = files.filter(file => file.endsWith('.pdf'));
-
-        for (const file of pdfFiles) {
-            const filePath = path.join(outputDir, file);
-            archive.file(filePath, { name: file });
-        }
-
-        await archive.finalize();
-        await new Promise((resolve) => output.on('close', resolve));
-
-        res.download(zipPath, `merged_documents_${jobId}.zip`, (err) => {
-            if (err) {
-                logger.error('Download error:', err);
+        function updateOverlay(overlayId, field, value) {
+            const overlay = processorOverlays.find(o => o.id === overlayId);
+            if (overlay) {
+                overlay[field] = field === 'text' ? value : parseInt(value);
             }
-            fs.remove(zipPath).catch(console.error);
-        });
-
-    } catch (error) {
-        logger.error('Download error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Add this new endpoint after your existing /api/merger/process endpoint in server.js
-
-// Main merger processing endpoint with page 9 overlays
-app.post('/api/merger/process', async (req, res) => {
-    const trackingJobId = `merger_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const job = performanceMonitor.startJob('merger', trackingJobId, {
-        fileCount: req.body.files?.pdfFiles?.length || 0,
-        hasEdi: !!req.body.files?.ediFile,
-        settings: req.body.settings,
-        applyOverlays: req.body.settings?.applyPage9Overlays || false
-    });
-    
-    try {
-        const { files, settings, manifestPath } = req.body;
-        logger.info(`Starting enhanced merger process with ${files.pdfFiles?.length || 0} PDF files`);
-
-        const jobId = uuidv4();
-        const outputDir = path.join('merger-outputs', jobId);
-        const tempOverlayDir = path.join('outputs', `overlay_${jobId}`);
-        
-        await fs.ensureDir(outputDir);
-        await fs.ensureDir(tempOverlayDir);
-
-        // Step 1: Run Python merger first
-        const pythonOptions = {
-            mode: 'text',
-            pythonPath: '/Users/matthewforan/SevenSeas_Code_Project/pdf-tools-suite-1/.venv/bin/python',
-            scriptPath: path.join(__dirname, 'python-scripts'),
-            args: [
-                '--input-folder', 'merger-uploads',
-                '--output-folder', outputDir,
-                '--job-id', jobId,
-                '--json-output'
-            ]
-        };
-
-        if (manifestPath && await fs.pathExists(manifestPath)) {
-            pythonOptions.args.push('--manifest-file', manifestPath);
         }
 
-        // Add EDI file if exists
-        if (files.ediFile && await fs.pathExists(files.ediFile.path)) {
-            pythonOptions.args.push('--edi-file', files.ediFile.path);
-        }
-
-      logger.info('Running Python merger with child_process...');
-
-        const pythonArgs = [
-            'python-scripts/pdf_merger.py',
-            '--input-folder', 'merger-uploads',
-            '--output-folder', outputDir,
-            '--job-id', jobId,
-            '--json-output'
-        ];
-
-        if (manifestPath && await fs.pathExists(manifestPath)) {
-            pythonArgs.push('--manifest-file', manifestPath);
-        }
-
-        if (files.ediFile && await fs.pathExists(files.ediFile.path)) {
-            pythonArgs.push('--edi-file', files.ediFile.path);
-        }
-
-        logger.info('Python command:', pythonArgs.join(' '));
-
-        const mergerResults = await new Promise((resolve, reject) => {
-            const python = spawn('./.venv/bin/python', pythonArgs);
+        // Process forms
+        async function processForms() {
+            const progressContainer = document.getElementById('processor-progress');
+            const progressFill = document.getElementById('processor-progress-fill');
+            const progressText = document.getElementById('processor-progress-text');
+            const processBtn = document.getElementById('process-forms-btn');
             
-            let stdout = '';
-            let stderr = '';
+            processBtn.disabled = true;
+            progressContainer.style.display = 'block';
             
-            python.stdout.on('data', (data) => {
-                const output = data.toString();
-                stdout += output;
-                logger.info('Python stdout:', output.trim());
-            });
-            
-            python.stderr.on('data', (data) => {
-                const error = data.toString();
-                stderr += error;
-                logger.error('Python stderr:', error.trim());
-            });
-            
-            python.on('close', (code) => {
-                logger.info(`Python process finished with code: ${code}`);
+            try {
+                // Upload files
+                progressText.textContent = 'Uploading files...';
+                progressFill.style.width = '25%';
                 
-                if (code !== 0) {
-                    reject(new Error(`Python script failed with code ${code}: ${stderr}`));
-                } else {
-                    // Find JSON output in stdout
-                    const lines = stdout.split('\n');
-                    const jsonLine = lines.find(line => line.trim().startsWith('{'));
+                const formData = new FormData();
+                processorFiles.forEach(file => formData.append('files', file));
+                
+                const uploadResponse = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!uploadResponse.ok) throw new Error('Upload failed');
+                const uploadResult = await uploadResponse.json();
+                
+                // Process with overlays
+                progressText.textContent = 'Processing forms...';
+                progressFill.style.width = '75%';
+                
+                const processResponse = await fetch('/api/process', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        files: uploadResult.files,
+                        overlays: processorOverlays,
+                        settings: {}
+                    })
+                });
+                
+                if (!processResponse.ok) throw new Error('Processing failed');
+                const processResult = await processResponse.json();
+                
+                // Complete
+                progressText.textContent = 'Complete!';
+                progressFill.style.width = '100%';
+                
+                showProcessorResults(processResult);
+                
+            } catch (error) {
+                progressText.textContent = `Error: ${error.message}`;
+                console.error('Processing failed:', error);
+            } finally {
+                processBtn.disabled = false;
+            }
+        }
+
+        function showProcessorResults(result) {
+            const resultsDiv = document.getElementById('processor-results');
+            const resultsContent = document.getElementById('processor-results-content');
+            
+            resultsContent.innerHTML = `
+                <h3>✅ Processing Complete!</h3>
+                <p>Successfully processed ${result.stats?.successful || 0} files</p>
+                <a href="${result.downloadUrl}" class="btn btn-success" download>📥 Download Results</a>
+            `;
+            
+            resultsDiv.className = 'results success';
+            resultsDiv.style.display = 'block';
+        }
+
+        // ==================== MERGER LOGIC ====================
+        
+        // Initialize merger uploads
+        function initMergerUploads() {
+            const uploadTypes = ['edi', 'advice', 'documents'];
+            
+            uploadTypes.forEach(type => {
+                const uploadArea = document.getElementById(`${type}-upload`);
+                const fileInput = document.getElementById(`${type}-input`);
+                
+                // Click to upload
+                uploadArea.addEventListener('click', () => fileInput.click());
+                
+                // Drag and drop
+                uploadArea.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    uploadArea.classList.add('dragover');
+                });
+                
+                uploadArea.addEventListener('dragleave', () => {
+                    uploadArea.classList.remove('dragover');
+                });
+                
+                uploadArea.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    uploadArea.classList.remove('dragover');
                     
-                    if (jsonLine) {
-                        try {
-                            const result = JSON.parse(jsonLine);
-                            logger.info('Parsed Python result:', result);
-                            resolve(result);
-                        } catch (e) {
-                            logger.error('JSON parse error:', e);
-                            resolve({ success: true, message: 'Completed but parse failed' });
-                        }
-                    } else {
-                        logger.warning('No JSON output found');
-                        resolve({ success: true, message: 'Completed successfully' });
+                    const files = Array.from(e.dataTransfer.files);
+                    handleMergerFileUpload(type, files);
+                });
+                
+                // File input change
+                fileInput.addEventListener('change', (e) => {
+                    const files = Array.from(e.target.files);
+                    handleMergerFileUpload(type, files);
+                });
+            });
+        }
+
+        // Handle merger file uploads with smart detection
+        function handleMergerFileUpload(uploadType, files) {
+            const corrections = [];
+            
+            files.forEach(file => {
+                let targetType = uploadType;
+                
+                // Smart detection
+                if (uploadType === 'documents') {
+                    // Check if it's actually an EDI file
+                    if (file.name.endsWith('.xls') || file.name.endsWith('.xlsx')) {
+                        targetType = 'edi';
+                        corrections.push(`📊 Moved ${file.name} to EDI section (Excel file detected)`);
+                    }
+                    // Check if it's an Advice document
+                    else if (file.name.toLowerCase().includes('advice')) {
+                        targetType = 'advice';
+                        corrections.push(`📋 Moved ${file.name} to Advice section (filename contains 'advice')`);
                     }
                 }
+                
+                // Add file to appropriate section
+                if (targetType === 'edi' && mergerFiles.edi.length > 0) {
+                    // Replace existing EDI file
+                    mergerFiles.edi = [file];
+                } else if (targetType === 'advice' && mergerFiles.advice.length > 0) {
+                    // Replace existing Advice file
+                    mergerFiles.advice = [file];
+                } else {
+                    mergerFiles[targetType].push(file);
+                }
+                
+                updateMergerFileList(targetType);
             });
             
-            // Add timeout
+            // Show corrections if any
+            if (corrections.length > 0) {
+                showSmartCorrections(corrections);
+            }
+            
+            updateMergerProcessButton();
+        }
+
+        // Show smart corrections
+        function showSmartCorrections(corrections) {
+            const correctionsList = document.getElementById('corrections-list');
+            const correctionsContainer = document.getElementById('smart-corrections');
+            
+            correctionsList.innerHTML = corrections.map(correction => 
+                `<div class="correction-item">✅ ${correction}</div>`
+            ).join('');
+            
+            correctionsContainer.classList.add('show');
+            
+            // Auto-hide after 5 seconds
             setTimeout(() => {
-                python.kill();
-                reject(new Error('Python process timeout'));
-            }, 5 * 60 * 1000); // 5 minute timeout
-        });
+                correctionsContainer.classList.remove('show');
+            }, 5000);
+        }
 
-        // Step 2: Apply page 9 overlays if requested
-        if (settings?.applyPage9Overlays) {
-            logger.info('Applying page 9 overlays to merged documents...');
+        // Update merger file lists
+        function updateMergerFileList(type) {
+            const fileList = document.getElementById(`${type}-files`);
+            const uploadArea = document.getElementById(`${type}-upload`);
+            const files = mergerFiles[type];
             
-            // Get all merged PDF files
-            const mergedFiles = await fs.readdir(outputDir);
-            const pdfFiles = mergedFiles.filter(file => file.endsWith('.pdf'));
-            
-            if (pdfFiles.length > 0) {
-                // Initialize text overlay processor
-                // Remove this line:
-            // const TextOverlayProcessor = require('./textOverlay.js');
-
-            // And replace with (since you already imported it at the top):
-            const overlayProcessor = new TextOverlayProcessor();
+            if (files && files.length > 0) {
+                uploadArea.classList.add('has-files');
                 
-                // Extract shipment data from the first PDF file
-                const firstPdfPath = path.join(outputDir, pdfFiles[0]);
-                await overlayProcessor.extractShipmentData(firstPdfPath);
+                fileList.innerHTML = files.map((file, index) => `
+                    <div class="file-item">
+                        <div class="file-info">
+                            <span class="file-name">${file.name}</span>
+                            <span class="file-size">(${formatFileSize(file.size)})</span>
+                        </div>
+                        <button class="remove-btn" onclick="removeMergerFile('${type}', ${index})">Remove</button>
+                    </div>
+                `).join('');
+            } else {
+                uploadArea.classList.remove('has-files');
+                fileList.innerHTML = '';
+            }
+        }
+
+        // Remove merger file
+        function removeMergerFile(type, index) {
+            mergerFiles[type].splice(index, 1);
+            updateMergerFileList(type);
+            updateMergerProcessButton();
+        }
+
+        // Update merger process button state
+        function updateMergerProcessButton() {
+            const processBtn = document.getElementById('merger-process-btn');
+            const hasEdi = mergerFiles.edi.length > 0;
+            const hasAdvice = mergerFiles.advice.length > 0;
+            const hasDocuments = mergerFiles.documents.length > 0;
+            
+            processBtn.disabled = !(hasEdi && (hasAdvice || hasDocuments));
+        }
+
+        // Start merger processing
+        async function startMergerProcessing() {
+            const progressContainer = document.getElementById('merger-progress');
+            const progressFill = document.getElementById('merger-progress-fill');
+            const progressText = document.getElementById('merger-progress-text');
+            const processBtn = document.getElementById('merger-process-btn');
+            
+            processBtn.disabled = true;
+            progressContainer.style.display = 'block';
+            
+            try {
+                // Step 1: Upload files (25%)
+                progressText.textContent = '📤 Uploading files...';
+                progressFill.style.width = '25%';
                 
-                if (overlayProcessor.shipmentData) {
-                    logger.info(`Extracted shipment data: Container ${overlayProcessor.shipmentData.containerNumber}, Ship ${overlayProcessor.shipmentData.shipName}`);
-                    
-                    // Process each merged PDF with overlays
-                    for (const pdfFile of pdfFiles) {
-                        const inputPath = path.join(outputDir, pdfFile);
-                        const tempPath = path.join(tempOverlayDir, pdfFile);
-                        
-                        logger.info(`Applying overlays to: ${pdfFile}`);
-                        
-                         const overlayResult = await overlayProcessor.processSinglePDFWithOverlay(inputPath, tempPath);
-                        
-                        if (overlayResult.success) {
-                            // Replace original with overlay version
-                            await fs.move(tempPath, inputPath, { overwrite: true });
-                            logger.info(`✅ Applied overlays to ${pdfFile}`);
-                        } else {
-                            logger.warning(`⚠️ Failed to apply overlays to ${pdfFile}: ${overlayResult.error}`);
-                        }
-                    }
-                    
-                    mergerResults.overlaysApplied = pdfFiles.length;
-                    mergerResults.shipmentData = overlayProcessor.shipmentData;
-                } else {
-                    logger.warning('Could not extract shipment data for overlays');
-                    mergerResults.overlaysApplied = 0;
-                }
-            }
-        }
-
-        // Clean up temp overlay directory
-        await fs.remove(tempOverlayDir);
-
-        mergerResults.jobId = jobId;
-        mergerResults.downloadUrl = `/api/merger/download/${jobId}`;
-
-        logger.info(`Enhanced merger processing completed for job ${jobId}`);
-
-        const completedJob = performanceMonitor.completeJob(trackingJobId, mergerResults);
-        
-        res.json({
-            success: true,
-            jobId: jobId,
-            downloadUrl: `/api/merger/download/${jobId}`,
-            stats: {
-                merged_clients: mergerResults.stats?.merged_clients || mergerResults.merged_clients || 0,
-                processed_files: mergerResults.stats?.processed_files || mergerResults.processed_files || 0,
-                overlays_applied: mergerResults.overlaysApplied || 0
-            },
-            performance: {
-                duration: completedJob.duration,
-                filesPerSecond: (mergerResults.stats?.processed_files || mergerResults.stats?.processed || 0) / (completedJob.duration / 1000)
-            },
-            originalResults: mergerResults  // Keep full results for debugging
-        });
-
-    } catch (error) {
-        performanceMonitor.failJob(trackingJobId, error);
-        logger.error('Enhanced merger processing error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message,
-            jobId: trackingJobId
-        });
-    }
-});
-
-// ==================== SHARED ROUTES ====================
-
-// Download processed files
-app.get('/api/download/:jobId', async (req, res) => {
-    try {
-        const { jobId } = req.params;
-        const outputDir = path.join('outputs', jobId);
-
-        if (!await fs.pathExists(outputDir)) {
-            return res.status(404).json({ error: 'Job not found' });
-        }
-
-        const zipPath = path.join('outputs', `${jobId}_processed.zip`);
-        const output = fs.createWriteStream(zipPath);
-        const archive = archiver('zip', { zlib: { level: 9 } });
-
-        archive.pipe(output);
-        archive.directory(outputDir, false);
-        await archive.finalize();
-
-        await new Promise((resolve) => output.on('close', resolve));
-
-        res.download(zipPath, `processed_files_${jobId}.zip`, (err) => {
-            if (err) {
-                logger.error('Download error:', err);
-            }
-            fs.remove(zipPath).catch(console.error);
-        });
-
-    } catch (error) {
-        logger.error('Download error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ==================== MONITORING ENDPOINTS ====================
-
-app.get('/api/metrics', (req, res) => {
-    try {
-        const metrics = performanceMonitor.getMetrics();
-        res.json({
-            success: true,
-            metrics: metrics
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Add these new routes to your server.js after your existing routes
-
-// ==================== SMART UPLOAD ROUTES ====================
-
-// Serve the smart interface as an alternative
-app.get('/smart', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'smart.html'));
-});
-
-// Smart file analysis endpoint
-app.post('/api/smart-analyze', uploadProcessor.array('files'), async (req, res) => {
-    try {
-        logger.info(`Smart analysis: ${req.files.length} files`);
-        
-        const analysis = {
-            torForms: [],
-            adviceDocuments: [],
-            billsOfLading: [],
-            customerDocuments: [],
-            ediFiles: [],
-            signatures: [],
-            unknownPdfs: [],
-            processingMode: null,
-            recommendations: []
-        };
-
-        // Analyze each uploaded file
-        for (const file of req.files) {
-            const fileInfo = {
-                id: uuidv4(),
-                originalName: file.originalname,
-                filename: file.filename,
-                path: file.path,
-                size: file.size,
-                type: detectFileType(file.originalname)
-            };
-
-            // Categorize files
-            switch (fileInfo.type) {
-                case 'tor_form':
-                    analysis.torForms.push(fileInfo);
-                    break;
-                case 'advice_document':
-                    analysis.adviceDocuments.push(fileInfo);
-                    break;
-                case 'bill_of_lading':
-                    analysis.billsOfLading.push(fileInfo);
-                    break;
-                case 'customer_document':
-                    analysis.customerDocuments.push(fileInfo);
-                    break;
-                case 'edi_file':
-                    analysis.ediFiles.push(fileInfo);
-                    break;
-                case 'signature':
-                    analysis.signatures.push(fileInfo);
-                    break;
-                default:
-                    analysis.unknownPdfs.push(fileInfo);
-            }
-        }
-
-        // Determine processing mode
-        const hasShippingDocs = analysis.adviceDocuments.length + analysis.billsOfLading.length + analysis.customerDocuments.length > 0;
-        const hasTorForms = analysis.torForms.length > 0;
-
-        if (hasTorForms && hasShippingDocs) {
-            analysis.processingMode = 'combined';
-            analysis.recommendations.push('Process TOR forms and merge shipping documents');
-        } else if (hasTorForms) {
-            analysis.processingMode = 'form_processing';
-            analysis.recommendations.push('Add text overlays to TOR forms');
-        } else if (hasShippingDocs) {
-            analysis.processingMode = 'document_merging';
-            analysis.recommendations.push('Merge shipping documents by client');
-        } else {
-            analysis.processingMode = 'unknown';
-            analysis.recommendations.push('Manual classification required');
-        }
-
-        // Store analysis for later processing
-        const analysisId = uuidv4();
-        const analysisPath = path.join('manifests', `analysis_${analysisId}.json`);
-        await fs.writeJson(analysisPath, analysis);
-
-        res.json({
-            success: true,
-            analysis: analysis,
-            analysisId: analysisId,
-            message: `Analyzed ${req.files.length} files successfully`
-        });
-
-    } catch (error) {
-        logger.error('Smart analysis error:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Smart auto-processing endpoint
-app.post('/api/smart-process', async (req, res) => {
-    const trackingJobId = `smart_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const job = performanceMonitor.startJob('smart-processor', trackingJobId);
-
-    try {
-        const { analysisId, settings } = req.body;
-        
-        // Load the analysis
-        const analysisPath = path.join('manifests', `analysis_${analysisId}.json`);
-        if (!await fs.pathExists(analysisPath)) {
-            throw new Error('Analysis not found');
-        }
-        
-        const analysis = await fs.readJson(analysisPath);
-        logger.info(`Smart processing: ${analysis.processingMode} mode`);
-
-        const results = {};
-        const jobId = uuidv4();
-
-        // Process TOR forms if any
-        if (analysis.torForms.length > 0) {
-            logger.info(`Processing ${analysis.torForms.length} TOR forms`);
-            
-            const formJobId = `forms_${jobId}`;
-            const formOutputDir = path.join('outputs', formJobId);
-            await fs.ensureDir(formOutputDir);
-
-            // Initialize text overlay processor
-            const processor = new TextOverlayProcessor();
-            
-            // Create temporary input directory
-            const tempInputDir = path.join('uploads', 'temp_forms_' + formJobId);
-            await fs.ensureDir(tempInputDir);
-
-            // Copy TOR form files to temp directory
-            for (const torForm of analysis.torForms) {
-                const sourcePath = torForm.path;
-                const destPath = path.join(tempInputDir, torForm.originalName);
-                if (await fs.pathExists(sourcePath)) {
-                    await fs.copy(sourcePath, destPath);
-                }
-            }
-
-            // Process the forms
-            const formResult = await processor.processBatch(tempInputDir, formOutputDir);
-            
-            // Clean up temp directory
-            await fs.remove(tempInputDir);
-            
-            results.formProcessing = {
-                success: true,
-                jobId: formJobId,
-                downloadUrl: `/api/download/${formJobId}`,
-                stats: formResult
-            };
-        }
-
-        // Process document merging if needed
-        if (analysis.adviceDocuments.length + analysis.billsOfLading.length + analysis.customerDocuments.length > 0) {
-            logger.info('Processing document merging');
-            
-            const mergerJobId = `merger_${jobId}`;
-            const mergerOutputDir = path.join('merger-outputs', mergerJobId);
-            await fs.ensureDir(mergerOutputDir);
-
-            // Copy relevant files to merger-uploads
-            const mergerInputDir = path.join('merger-uploads', 'temp_' + mergerJobId);
-            await fs.ensureDir(mergerInputDir);
-
-            // Copy shipping documents
-            const allShippingDocs = [
-                ...analysis.adviceDocuments,
-                ...analysis.billsOfLading,
-                ...analysis.customerDocuments
-            ];
-
-            for (const doc of allShippingDocs) {
-                if (await fs.pathExists(doc.path)) {
-                    await fs.copy(doc.path, path.join(mergerInputDir, doc.originalName));
-                }
-            }
-
-            // Copy EDI file if exists
-            let ediPath = null;
-            if (analysis.ediFiles.length > 0) {
-                const ediFile = analysis.ediFiles[0];
-                ediPath = path.join(mergerInputDir, ediFile.originalName);
-                if (await fs.pathExists(ediFile.path)) {
-                    await fs.copy(ediFile.path, ediPath);
-                }
-            }
-
-            // Run Python merger
-            const pythonOptions = {
-                mode: 'text',
-                pythonPath: '/Users/matthewforan/SevenSeas_Code_Project/pdf-tools-suite-1/.venv/bin/python',
-                scriptPath: path.join(__dirname, 'python-scripts'),
-                args: [
-                    '--input-folder', mergerInputDir,
-                    '--output-folder', mergerOutputDir,
-                    '--job-id', mergerJobId,
-                    '--json-output'
-                ]
-            };
-
-            if (ediPath) {
-                pythonOptions.args.push('--edi-file', ediPath);
-            }
-
-            const mergerResults = await new Promise((resolve, reject) => {
-                PythonShell.run('pdf_merger.py', pythonOptions, (err, results) => {
-                    if (err) {
-                        logger.error('Python merger error:', err);
-                        reject(err);
-                    } else {
-                        try {
-                            const lastLine = results[results.length - 1];
-                            const result = JSON.parse(lastLine);
-                            resolve(result);
-                        } catch (parseErr) {
-                            logger.error('Failed to parse merger results:', parseErr);
-                            resolve({
-                                success: true,
-                                message: 'Merging completed, but could not parse detailed results'
-                            });
-                        }
-                    }
+                const formData = new FormData();
+                
+                // Add PDFs
+                [...mergerFiles.advice, ...mergerFiles.documents].forEach(file => {
+                    formData.append('pdfFiles', file);
                 });
-            });
-
-            // Clean up temp directory
-            await fs.remove(mergerInputDir);
-
-            results.documentMerging = {
-                success: true,
-                jobId: mergerJobId,
-                downloadUrl: `/api/merger/download/${mergerJobId}`,
-                stats: mergerResults
-            };
-        }
-
-        // Complete tracking
-        const completedJob = performanceMonitor.completeJob(trackingJobId, results);
-
-        res.json({
-            success: true,
-            results: results,
-            processingMode: analysis.processingMode,
-            performance: {
-                duration: completedJob.duration,
-                mode: analysis.processingMode
-            },
-            downloadUrls: generateDownloadUrls(results)
-        });
-
-    } catch (error) {
-        performanceMonitor.failJob(trackingJobId, error);
-        logger.error('Smart processing error:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Generate download URLs based on processing results
-function generateDownloadUrls(results) {
-    const urls = [];
-    
-    if (results.formProcessing && results.formProcessing.success) {
-        urls.push({
-            type: 'Form Processing Results',
-            url: results.formProcessing.downloadUrl,
-            description: 'TOR forms with text overlays'
-        });
-    }
-    
-    if (results.documentMerging && results.documentMerging.success) {
-        urls.push({
-            type: 'Merged Documents',
-            url: results.documentMerging.downloadUrl,
-            description: 'Shipping documents merged by client'
-        });
-    }
-    
-    return urls;
-}
-
-// File type detection utility
-function detectFileType(filename) {
-    const name = filename.toLowerCase();
-    
-    if (name.includes('tor') || name.includes('declaration')) {
-        return 'tor_form';
-    } else if (name.includes('advice') || name.includes('arrival')) {
-        return 'advice_document';
-    } else if (name.includes('bill') || name.includes('lading')) {
-        return 'bill_of_lading';
-    } else if (name.endsWith('.xls') || name.endsWith('.xlsx')) {
-        return 'edi_file';
-    } else if (/\d{3}[-\/]\d{3}[-\/]\d{3}/.test(name)) {
-        return 'customer_document';
-    } else if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.gif')) {
-        return 'signature';
-    } else if (name.endsWith('.pdf')) {
-        return 'unknown_pdf';
-    }
-    
-    return 'unknown';
-}
-
-// Health check endpoint specifically for smart mode
-app.get('/api/smart/health', (req, res) => {
-    try {
-        const health = performanceMonitor.getHealthStatus();
-        const signatureExists = fs.existsSync(SIGNATURE_PATH);
-        
-        res.json({
-            ...health,
-            smartMode: {
-                status: 'active',
-                features: [
-                    'Auto file detection',
-                    'Smart processing mode selection',
-                    'Combined form processing and document merging'
-                ]
-            },
-            services: {
-                formProcessor: 'active',
-                documentMerger: 'active',
-                signature: signatureExists ? 'available' : 'missing',
-                smartAnalysis: 'active'
-            }
-        });
-    } catch (error) {
-        res.status(500).json({ 
-            status: 'error', 
-            error: error.message 
-        });
-    }
-});
-
-app.get('/api/health', (req, res) => {
-    try {
-        const health = performanceMonitor.getHealthStatus();
-        const signatureExists = fs.existsSync(SIGNATURE_PATH);
-        
-        res.json({
-            ...health,
-            services: {
-                formProcessor: 'active',
-                documentMerger: 'active',
-                signature: signatureExists ? 'available' : 'missing'
-            }
-        });
-    } catch (error) {
-        res.status(500).json({ 
-            status: 'error', 
-            error: error.message 
-        });
-    }
-});
-
-app.get('/api/system-info', (req, res) => {
-    try {
-        const metrics = performanceMonitor.getMetrics();
-        
-        res.json({
-            application: {
-                name: 'PDF Tools Suite',
-                version: '2.0.0',
-                uptime: metrics.uptimeHours + ' hours',
-                startTime: new Date(metrics.startTime).toISOString()
-            },
-            performance: {
-                totalRequests: metrics.totalRequests,
-                successfulRequests: metrics.successfulRequests,
-                failedRequests: metrics.failedRequests,
-                successRate: metrics.successRate,
-                averageProcessingTime: metrics.averageProcessingTime.toFixed(2) + 'ms'
-            },
-            jobs: {
-                mergerJobs: metrics.mergerJobs,
-                formProcessorJobs: metrics.formProcessorJobs,
-                activeJobs: metrics.activeJobs
-            },
-            system: {
-                memoryUsage: process.memoryUsage(),
-                platform: process.platform,
-                nodeVersion: process.version,
-                currentTime: new Date().toISOString()
-            }
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/api/info', (req, res) => {
-    res.json({
-        name: 'PDF Processor & Merger Suite',
-        version: '2.0.0',
-        features: [
-            'PDF Form Filling',
-            'Document Merging',
-            'Batch Processing',
-            'Manifest Management'
-        ]
-    });
-});
-
-// ==================== UTILITY FUNCTIONS ====================
-
-async function processEdiFile(filePath) {
-    try {
-        const workbook = XLSX.readFile(filePath);
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-        const data = XLSX.utils.sheet_to_json(worksheet);
-
-        const manifest = {};
-        
-        data.forEach(row => {
-            const consigneeRef = row['Consignees Reference'] || row['Reference'];
-            const consigneeName = row['Consignees Name'] || row['Name'];
-            
-            if (consigneeRef && consigneeName) {
-                manifest[consigneeRef.toString().trim()] = consigneeName.toString().trim();
-            }
-        });
-
-        logger.info(`Processed EDI file: ${Object.keys(manifest).length} entries`);
-        return manifest;
-
-    } catch (error) {
-        logger.error('EDI processing error:', error);
-        throw error;
-    }
-}
-
-async function processReferenceDocument(filePath) {
-    logger.info('Reference document processing not yet implemented');
-    return {};
-}
-
-async function saveManifestAsCsv(manifest, filePath) {
-    const csvWriter = createCsvWriter({
-        path: filePath,
-        header: [
-            { id: 'reference', title: 'ConsigneeRef' },
-            { id: 'name', title: 'FullName' }
-        ]
-    });
-
-    const records = Object.entries(manifest).map(([ref, name]) => ({
-        reference: ref,
-        name: name
-    }));
-
-    await csvWriter.writeRecords(records);
-    logger.info(`Manifest saved to ${filePath} with ${records.length} entries`);
-}
-
-// Cleanup old files (daily at 2 AM)
-cron.schedule('0 2 * * *', async () => {
-    logger.info('Starting daily cleanup');
-    
-    const cleanupDirs = ['uploads', 'outputs', 'merger-uploads', 'merger-outputs'];
-    const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
-    
-    for (const dir of cleanupDirs) {
-        try {
-            if (await fs.pathExists(dir)) {
-                const files = await fs.readdir(dir);
-                for (const file of files) {
-                    const filePath = path.join(dir, file);
-                    const stats = await fs.stat(filePath);
+                
+                // Add EDI file
+                if (mergerFiles.edi.length > 0) {
+                    formData.append('ediFile', mergerFiles.edi[0]);
+                }
+                
+                const uploadResponse = await fetch('/api/merger/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!uploadResponse.ok) throw new Error('Upload failed');
+                const uploadResult = await uploadResponse.json();
+                
+                // Step 2: Process manifest (50%)
+                progressText.textContent = '📊 Processing EDI manifest...';
+                progressFill.style.width = '50%';
+                
+                let manifestPath = null;
+                if (uploadResult.files.ediFile) {
+                    const manifestResponse = await fetch('/api/merger/process-manifest', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            ediFilePath: uploadResult.files.ediFile.path
+                        })
+                    });
                     
-                    if (Date.now() - stats.mtime.getTime() > maxAge) {
-                        await fs.remove(filePath);
-                        logger.info(`Cleaned up old file: ${filePath}`);
+                    if (manifestResponse.ok) {
+                        const manifestResult = await manifestResponse.json();
+                        manifestPath = manifestResult.manifestPath;
                     }
                 }
+                
+                // Step 3: Merge documents with page 9 overlays (75%)
+                progressText.textContent = '🚢 Merging documents and applying page 9 overlays...';
+                progressFill.style.width = '75%';
+                
+                const mergeResponse = await fetch('/api/merger/process', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        files: uploadResult.files,
+                        manifestPath: manifestPath,
+                        settings: {
+                            applyPage9Overlays: true,
+                            namingFormat: 'name_ref',
+                            pageOrder: 'advice_bill_customer'
+                        }
+                    })
+                });
+                
+                if (!mergeResponse.ok) throw new Error('Merging failed');
+                const mergeResult = await mergeResponse.json();
+               
+                // Add these debugging lines:
+                console.log('🔍 Full merge result:', mergeResult);
+                console.log('🔍 Download URL:', mergeResult.downloadUrl);
+                console.log('🔍 Stats object:', mergeResult.stats);
+                console.log('🔍 Job ID:', mergeResult.jobId);
+                
+                // Complete (100%)
+                progressText.textContent = '✅ Processing complete!';
+                progressFill.style.width = '100%';
+                
+                showMergerResults(mergeResult);
+                
+            } catch (error) {
+                progressText.textContent = `❌ Error: ${error.message}`;
+                console.error('Merger processing failed:', error);
+            } finally {
+                processBtn.disabled = false;
             }
-        } catch (error) {
-            logger.error(`Cleanup error for ${dir}:`, error);
         }
-    }
-});
+        // Add this NEW function
+        function displayTaxAlerts(taxAlerts) {
+            if (!taxAlerts || taxAlerts.length === 0) {
+                return ''; // No alerts to show
+            }
+            
+            let alertHtml = `
+                <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <h3 style="color: #856404; margin-top: 0; display: flex; align-items: center;">
+                        🚨 Tax Alert Summary
+                    </h3>
+                    <p style="margin: 10px 0;"><strong>${taxAlerts.length} client(s) flagged for customs review</strong></p>
+            `;
+            
+            taxAlerts.forEach(alert => {
+                alertHtml += `
+                    <div style="border-left: 4px solid #ffc107; padding: 15px; margin: 15px 0; background: white; border-radius: 4px;">
+                        <strong style="color: #856404;">${alert.client_name}</strong> 
+                        <span style="color: #6c757d;">(${alert.client_ref})</span>
+                        <ul style="margin: 8px 0; padding-left: 20px;">`;
+                
+                alert.alerts.forEach(item => {
+                    alertHtml += `<li style="margin: 4px 0;"><strong>${item.keyword}</strong> found on page ${item.page}</li>`;
+                });
+                
+                alertHtml += `</ul></div>`;
+            });
+            
+            alertHtml += `</div>`;
+            return alertHtml;
+        }
 
-// ==================== START SERVER ====================
+        function showMergerResults(result) {
+            const resultsDiv = document.getElementById('merger-results');
+            const resultsContent = document.getElementById('merger-results-content');
+            
+            // Add fallback values with debugging
+            const clientCount = result.stats?.merged_clients || 0;
+            
+            // Build the results HTML
+            let resultsHtml = `
+                <h3>✅ Merger Complete!</h3>
+                <p>Successfully merged documents for ${clientCount} clients</p>
+                <p>All documents include page 9 overlays with container/ship information</p>
+                <a href="${result.downloadUrl}" class="btn btn-success" download>📥 Download Merged Documents</a>
+            `;
+            
+            // ADD TAX ALERTS HERE
+            if (result.tax_alerts) {
+                resultsHtml += displayTaxAlerts(result.tax_alerts);
+            }
+            
+            resultsContent.innerHTML = resultsHtml;
+            resultsDiv.className = 'results success';
+            resultsDiv.style.display = 'block';
+        }
 
-async function startServer() {
-    try {
-        await ensureDirectories();
-        await ensureSignature();
+        // ==================== UTILITY FUNCTIONS ====================
         
-        app.listen(PORT, () => {
-            logger.info(`🚀 PDF Processor & Merger Suite running on port ${PORT}`);
-            logger.info(`📋 Form Processor: http://localhost:${PORT}`);
-            logger.info(`🚢 Document Merger: http://localhost:${PORT}#merger`);
-            logger.info(`📊 Health Check: http://localhost:${PORT}/api/health`);
-            console.log('✅ Server ready!');
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            initProcessorUploads();
+            initMergerUploads();
+            console.log('🚀 PDF Tools Suite initialized!');
         });
-    } catch (error) {
-        logger.error('Failed to start server:', error);
-        process.exit(1);
-    }
-}
-
-startServer();
-
-module.exports = app;
+    </script>
+</body>
+</html>
