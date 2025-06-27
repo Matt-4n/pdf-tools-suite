@@ -1,769 +1,1255 @@
-import os
-import re
-import fitz  # PyMuPDF
-import csv
-import argparse
-import sys
-import logging
-from datetime import datetime
-from pathlib import Path
-from collections import defaultdict
-from pdf_optimizer import PDFOptimizer
 
-# For Excel file reading
-try:
-    import openpyxl
-    EXCEL_AVAILABLE = True
-except ImportError:
-    try:
-        import xlrd
-        EXCEL_AVAILABLE = True
-    except ImportError:
-        EXCEL_AVAILABLE = False
+const { spawn } = require('child_process');
+const { performance } = require('perf_hooks');
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs-extra');
+const cors = require('cors');
+const archiver = require('archiver');
+const { v4: uuidv4 } = require('uuid');
+const cron = require('node-cron');
+const winston = require('winston');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+const { PythonShell } = require('python-shell');
+const XLSX = require('xlsx');
+const csv = require('csv-parser');
+const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 
-def setup_logging(job_id=None):
-    """Set up simple logging for PDF merger"""
+// Import your text overlay processor
+const TextOverlayProcessor = require('./textOverlay.js');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Constants
+const SIGNATURE_PATH = './signatures/default-signature.png';
+
+// Simple Performance Monitor Class (keeping your existing implementation)
+class SimplePerformanceMonitor {
+    constructor() {
+        this.metrics = {
+            totalRequests: 0,
+            successfulRequests: 0,
+            failedRequests: 0,
+            totalProcessingTime: 0,
+            averageProcessingTime: 0,
+            mergerJobs: 0,
+            formProcessorJobs: 0,
+            startTime: Date.now(),
+            errors: []
+        };
+        
+        this.activeJobs = new Map();
+    }
     
-    # Create logs directory if it doesn't exist
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
+    startJob(jobType, jobId, details = {}) {
+        const job = {
+            type: jobType,
+            id: jobId,
+            startTime: performance.now(),
+            details,
+            status: 'running'
+        };
+        
+        this.activeJobs.set(jobId, job);
+        console.log(`📊 Started ${jobType} job: ${jobId}`);
+        
+        return job;
+    }
     
-    # Create log filename with timestamp
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    if job_id:
-        log_filename = f"merger_{job_id}_{timestamp}.log"
-    else:
-        log_filename = f"pdf_merger_{timestamp}.log"
-    
-    # Set up logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            # Log to file
-            logging.FileHandler(log_dir / log_filename, encoding='utf-8'),
-            # Also show on screen (console)
-            logging.StreamHandler()
-        ]
-    )
-    
-    # Return logger
-    logger = logging.getLogger('PDFMerger')
-    logger.info("=== PDF Merger Started ===")
-    logger.info(f"Log file: {log_filename}")
-    
-    return logger
-
-class PDFMerger:
-    def __init__(self, input_folder, output_folder, reference_doc=None, edi_file=None, 
-                 enable_optimization=True, target_size_mb=1.2):
-        # Add logging
-        self.logger = logging.getLogger('PDFMerger')
-        self.logger.info(f"Initializing PDF Merger: {input_folder} -> {output_folder}")
+    completeJob(jobId, result = {}) {
+        const job = this.activeJobs.get(jobId);
+        if (!job) return null;
         
-        # Basic initialization
-        self.input_folder = Path(input_folder)
-        self.output_folder = Path(output_folder)
-        self.output_folder.mkdir(exist_ok=True)
-        self.clients = defaultdict(lambda: {'info': None, 'pages': []})
-        self.manifest = {}
-        self.reference_doc = reference_doc
-        self.edi_file = edi_file
+        const duration = performance.now() - job.startTime;
+        job.duration = duration;
+        job.status = 'completed';
+        job.result = result;
         
-        # Add optimization settings
-        self.enable_optimization = enable_optimization
-        self.target_size_mb = target_size_mb
+        this.metrics.totalRequests++;
+        this.metrics.successfulRequests++;
+        this.metrics.totalProcessingTime += duration;
+        this.metrics.averageProcessingTime = this.metrics.totalProcessingTime / this.metrics.successfulRequests;
         
-        if self.enable_optimization:
-            self.optimizer = PDFOptimizer(target_size_mb=target_size_mb, quality=85)
-            self.logger.info(f"PDF optimization enabled (target: {target_size_mb}MB)")
-            
-            # Initialize optimization statistics
-            self.optimization_stats = {
-                'files_optimized': 0,
-                'total_savings_mb': 0,
-                'average_compression_ratio': 0
-            }
-        
-        # Priority order for creating manifest:
-        # 1. EDI Excel file (most reliable)
-        # 2. Reference PDF document
-        # 3. Existing CSV manifest
-        if edi_file:
-            self.create_manifest_from_edi(edi_file)
-        elif reference_doc:
-            self.create_manifest_from_reference(reference_doc)
-        else:
-            # Try to load existing CSV manifest
-            self.load_manifest("client_manifest.csv")
-        
-        # NEW: Add tracking for reports
-        self.compression_report = []
-        self.tax_alerts = [] 
-
-    def create_manifest_from_edi(self, edi_file_path):
-        """Create CSV manifest from EDI Excel file"""
-        edi_path = Path(edi_file_path)
-        if not edi_path.exists():
-            self.logger.error(f"EDI file not found: {edi_file_path}")
-            return
-
-        if not EXCEL_AVAILABLE:
-            self.logger.error("Excel libraries not available. Please install openpyxl or xlrd.")
-            return
-
-        self.logger.info(f"Creating manifest from EDI file: {edi_file_path}")
-
-        try:
-            manifest_data = {}
-
-            # Check file extension and use appropriate library
-            if str(edi_path).endswith('.xls'):
-                # Use xlrd for .xls files
-                import xlrd
-                workbook = xlrd.open_workbook(edi_path)
-                sheet = workbook.sheet_by_index(0)
-
-                # Read data starting from row 1 (skip header row 0)
-                for row_idx in range(1, sheet.nrows):
-                    row = sheet.row_values(row_idx)
-                    if len(row) > 11:  # Ensure we have enough columns
-                        consignee_name = row[6]  # Column 6: "Consignees Name"
-                        consignee_ref = row[11]  # Column 11: "Consignees Reference"
-
-                        if consignee_ref and consignee_name:
-                            # Clean up the reference format
-                            ref_clean = str(consignee_ref).strip()
-                            name_clean = str(consignee_name).strip()
-
-                            # For EDI files, trust the data completely - no validation
-                            if ref_clean and name_clean and ref_clean != 'nan' and name_clean != 'nan':
-                                manifest_data[ref_clean] = name_clean
-                                self.logger.debug(f"Added EDI entry: {ref_clean} -> {name_clean}")
-
-            else:
-                # Use openpyxl for .xlsx files
-                from openpyxl import load_workbook
-                workbook = load_workbook(edi_path)
-                sheet = workbook.active
-
-                # Read data starting from row 2 (skip header row 1)
-                for row in sheet.iter_rows(min_row=2, values_only=True):
-                    if len(row) > 11:  # Ensure we have enough columns
-                        consignee_name = row[6]  # Column 6: "Consignees Name"
-                        consignee_ref = row[11]  # Column 11: "Consignees Reference"
-
-                        if consignee_ref and consignee_name:
-                            # Clean up the reference format
-                            ref_clean = str(consignee_ref).strip()
-                            name_clean = str(consignee_name).strip()
-
-                            # For EDI files, trust the data completely - no validation
-                            if ref_clean and name_clean and ref_clean != 'nan' and name_clean != 'nan':
-                                manifest_data[ref_clean] = name_clean
-                                self.logger.debug(f"Added EDI entry: {ref_clean} -> {name_clean}")
-
-            # Create CSV file
-            csv_path = "client_manifest.csv"
-            with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(['ConsigneeRef', 'FullName'])
-
-                for ref, name in sorted(manifest_data.items()):
-                    writer.writerow([ref, name])
-
-            self.logger.info(f"Created manifest CSV with {len(manifest_data)} clients: {csv_path}")
-
-            # Load the created manifest into memory
-            self.manifest = manifest_data
-
-        except Exception as e:
-            self.logger.error(f"Error creating manifest from EDI file: {e}")
-
-    def create_manifest_from_reference(self, reference_doc):
-        """Create manifest from reference PDF document - placeholder implementation"""
-        self.logger.info(f"Creating manifest from reference document: {reference_doc}")
-        # TODO: Implement this method if needed
-        pass
-
-    def load_manifest(self, manifest_file):
-        """Load existing CSV manifest"""
-        self.logger.info(f"Loading manifest from file: {manifest_file}")
-        try:
-            import csv
-            with open(manifest_file, 'r', newline='', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    ref = row.get('ConsigneeRef', '').strip()
-                    name = row.get('FullName', '').strip()
-                    if ref and name:
-                        self.manifest[ref] = name
-                        self.logger.info(f"Loaded client: {ref} -> {name}")
-            
-            self.logger.info(f"Successfully loaded {len(self.manifest)} clients from manifest")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to load manifest: {e}")
-
-    def scan_for_tax_keywords(self, doc, client_name, client_ref):
-        """
-        Scan every page after page 12 of a document for tax-relevant keywords
-        """
-        tax_keywords = ['tools', 'alcohol', 'new']
-        found_keywords = []
-
-        total_pages = len(doc)
-        # Scan all pages after page 12 (manifest section)
-        start_page = 12  # Start from page 13 (0-indexed = 12)
-
-        if total_pages <= 12:
-            self.logger.debug(f"Document only has {total_pages} pages, skipping tax scan: {client_name}")
-            return
-
-        self.logger.debug(f"Scanning pages {start_page + 1}-{total_pages} for tax keywords: {client_name}")
-
-        for page_num in range(start_page, total_pages):
-            try:
-                page = doc[page_num]
-                text = page.get_text().lower()
-
-                for keyword in tax_keywords:
-                    if keyword in text:
-                        # Find context around the keyword
-                        words = text.split()
-                        for i, word in enumerate(words):
-                            if keyword in word:
-                                # Get 3 words before and after for context
-                                context_start = max(0, i - 3)
-                                context_end = min(len(words), i + 4)
-                                context = ' '.join(words[context_start:context_end])
-
-                                found_keywords.append({
-                                    'keyword': keyword.upper(),
-                                    'page': page_num + 1,
-                                    'context': context.strip()
-                                })
-                                self.logger.info(f"🚨 TAX ALERT: {keyword.upper()} found in {client_name} (Page {page_num + 1})")
-                                break  # Only record first occurrence per page
-
-            except Exception as e:
-                self.logger.debug(f"Could not scan page {page_num + 1}: {e}")
-
-        # Store tax alerts for this client
-        if found_keywords:
-            self.tax_alerts.append({
-                'client_name': client_name,
-                'client_ref': client_ref,
-                'alerts': found_keywords
-            })
-
-    def generate_compression_report(self):
-        """
-        Generate a detailed compression report
-        """
-        if not self.compression_report:
-            return "No compression data available."
-
-        report = []
-        report.append("=" * 80)
-        report.append("📊 PDF COMPRESSION REPORT")
-        report.append("=" * 80)
-
-        total_original = sum(item['original_size_mb'] for item in self.compression_report)
-        total_final = sum(item['final_size_mb'] for item in self.compression_report)
-        total_saved = total_original - total_final
-
-        report.append(f"📈 SUMMARY:")
-        report.append(f"   • Files processed: {len(self.compression_report)}")
-        report.append(f"   • Total space saved: {total_saved:.2f} MB")
-        report.append(f"   • Average compression: {total_original/total_final:.1f}x")
-        report.append(f"   • Overall size reduction: {(total_saved/total_original)*100:.1f}%")
-        report.append("")
-
-        report.append("📁 INDIVIDUAL FILES:")
-        report.append("-" * 80)
-
-        # Sort by savings (largest first)
-        sorted_files = sorted(self.compression_report, key=lambda x: x['savings_mb'], reverse=True)
-
-        for item in sorted_files:
-            savings_pct = (item['savings_mb'] / item['original_size_mb']) * 100
-            report.append(f"• {item['filename']}")
-            report.append(f"  {item['original_size_mb']:.2f}MB → {item['final_size_mb']:.2f}MB "
-                         f"(saved {item['savings_mb']:.2f}MB, {savings_pct:.1f}%)")
-            report.append("")
-
-        return "\n".join(report)
-
-    def generate_tax_alert_report(self):
-        """
-        Generate a tax alert report for keywords found
-        """
-        if not self.tax_alerts:
-            return "✅ No tax-relevant keywords found in any documents."
-
-        report = []
-        report.append("=" * 80)
-        report.append("🚨 TAX ALERT REPORT")
-        report.append("=" * 80)
-
-        report.append(f"⚠️  FLAGGED CLIENTS: {len(self.tax_alerts)}")
-        report.append(f"🔍 Keywords scanned: TOOLS, ALCOHOL, NEW")
-        report.append(f"📄 Scan area: All pages after page 12 (manifest section)")
-        report.append("")
-
-        for alert in self.tax_alerts:
-            report.append(f"🚨 {alert['client_name']} ({alert['client_ref']})")
-            report.append("-" * 60)
-
-            for keyword_alert in alert['alerts']:
-                report.append(f"   • {keyword_alert['keyword']} found on page {keyword_alert['page']}")
-                report.append(f"     Context: \"{keyword_alert['context']}\"")
-            report.append("")
-
-        return "\n".join(report)
-
-    def save_reports_to_file(self, output_folder):
-        """
-        Save both reports to text files
-        """
-        try:
-            # Compression Report
-            compression_report_path = Path(output_folder) / "compression_report.txt"
-            with open(compression_report_path, 'w', encoding='utf-8') as f:
-                f.write(self.generate_compression_report())
-            self.logger.info(f"📊 Compression report saved: {compression_report_path}")
-
-            # Tax Alert Report
-            tax_report_path = Path(output_folder) / "tax_alert_report.txt"
-            with open(tax_report_path, 'w', encoding='utf-8') as f:
-                f.write(self.generate_tax_alert_report())
-            self.logger.info(f"🚨 Tax alert report saved: {tax_report_path}")
-
-            return compression_report_path, tax_report_path
-
-        except Exception as e:
-            self.logger.error(f"Failed to save reports: {e}")
-            return None, None
-
-    def process_multi_client_document(self, pdf_path, doc_type):
-        """Process multi-client documents (Advice of Arrivals, Bills of Lading)"""
-        self.logger.info(f"Processing {doc_type}: {pdf_path.name}")
-        
-        try:
-            doc = fitz.open(pdf_path)
-            total_pages = len(doc)
-            
-            # Process each page to find client references
-            for page_num in range(total_pages):
-                page = doc[page_num]
-                text = page.get_text()
-                
-                # Look for reference patterns in the text
-                ref_patterns = [
-                    r'(\d{3}[-/]\d{3}[-/]\d{3})',  # 000-000-000 or 000/000/000
-                    r'(\d{3}\s+\d{3}\s+\d{3})',   # 000 000 000
-                ]
-                
-                for pattern in ref_patterns:
-                    matches = re.findall(pattern, text)
-                    for match in matches:
-                        # Normalize reference format
-                        ref_normalized = match.replace('-', '/').replace(' ', '/')
-                        
-                        # Check if this reference exists in our EDI manifest
-                        if ref_normalized in self.manifest:
-                            client_name = self.manifest[ref_normalized]
-                            self.logger.info(f"{doc_type}: Found {ref_normalized} - {client_name} on page {page_num + 1}")
-                            
-                            # Store page info for this client
-                            if not self.clients[ref_normalized]['info']:
-                                self.clients[ref_normalized]['info'] = (ref_normalized, client_name)
-                            
-                            self.clients[ref_normalized]['pages'].append({
-                                'page_num': page_num,
-                                'doc_type': doc_type,
-                                'doc_obj': doc
-                            })
-                            break  # Only match once per page
-            
-            return doc
-            
-        except Exception as e:
-            self.logger.error(f"Error processing {doc_type} {pdf_path.name}: {e}")
-            return None
-
-    def process_customer_document_edi_first(self, pdf_path):
-        """Process individual customer document using EDI-first matching"""
-        self.logger.info(f"Processing Customer Document: {pdf_path.name}")
-
-        # First, try to extract reference from filename
-        filename = pdf_path.name
-        ref_match = re.search(r'(\d{3}[-/]\d{3}[-/]\d{3})', filename)
-        
-        try:
-            doc = fitz.open(pdf_path)
-            
-            if ref_match:
-                file_ref = ref_match.group(1).replace('-', '/')
-                
-                # Check if this reference exists in EDI manifest
-                if file_ref in self.manifest:
-                    client_name = self.manifest[file_ref]
-                    self.logger.info(f"Customer Doc: {file_ref} - {client_name} (EDI match)")
-                    
-                    # Store customer document info
-                    if not self.clients[file_ref]['info']:
-                        self.clients[file_ref]['info'] = (file_ref, client_name)
-                    
-                    # Add all pages of this document
-                    for page_num in range(len(doc)):
-                        self.clients[file_ref]['pages'].append({
-                            'page_num': page_num,
-                            'doc_type': 'Customer Document',
-                            'doc_obj': doc
-                        })
-                    
-                    return doc
-            
-            # If filename didn't work, scan document content for EDI references
-            text = ""
-            for page in doc:
-                text += page.get_text()
-            
-            # Look for any EDI reference in the document text
-            for edi_ref in self.manifest.keys():
-                if edi_ref in text or edi_ref.replace('/', '-') in text:
-                    client_name = self.manifest[edi_ref]
-                    self.logger.info(f"Customer Doc: {edi_ref} - {client_name} (EDI content match)")
-                    
-                    if not self.clients[edi_ref]['info']:
-                        self.clients[edi_ref]['info'] = (edi_ref, client_name)
-                    
-                    for page_num in range(len(doc)):
-                        self.clients[edi_ref]['pages'].append({
-                            'page_num': page_num,
-                            'doc_type': 'Customer Document',
-                            'doc_obj': doc
-                        })
-                    
-                    return doc
-            
-            # Document doesn't match any EDI reference
-            self.logger.warning(f"Customer document {pdf_path.name} does not match any EDI reference - skipping")
-            doc.close()
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Error processing customer document {pdf_path.name}: {e}")
-            return None
-
-    def merge_client_documents(self, client_key, client_data):
-        """Merge all documents for a specific client with optimization and tax scanning"""
-        consignee_ref, full_name = client_data['info']
-        if not consignee_ref:
-            self.logger.error(f"Missing consignee reference for {client_key}")
-            return False
-
-        # If no name, create a default one
-        if not full_name:
-            full_name = f"Client_{consignee_ref.replace('/', '_')}"
-
-        self.logger.info(f"Merging documents for: {consignee_ref} - {full_name}")
-
-        # Group pages by document type
-        advice_pages = []
-        bill_pages = []
-        customer_pages = []
-
-        for page_info in client_data['pages']:
-            if page_info['doc_type'] == 'Advice of Arrivals':
-                advice_pages.append(page_info)
-            elif page_info['doc_type'] == 'Bill of Lading':
-                bill_pages.append(page_info)
-            elif page_info['doc_type'] == 'Customer Document':
-                customer_pages.append(page_info)
-
-        self.logger.info(f"Found: {len(advice_pages)} Advice pages, {len(bill_pages)} Bill pages, {len(customer_pages)} Customer pages")
-
-        # Create merged PDF in correct order: Advice → Bills → Customer
-        merged_doc = fitz.open()  # Create new empty document
-
-        # Add pages in order
-        for page_info in advice_pages:
-            source_doc = page_info['doc_obj']
-            page_num = page_info['page_num']
-            merged_doc.insert_pdf(source_doc, from_page=page_num, to_page=page_num)
-
-        for page_info in bill_pages:
-            source_doc = page_info['doc_obj']
-            page_num = page_info['page_num']
-            merged_doc.insert_pdf(source_doc, from_page=page_num, to_page=page_num)
-
-        for page_info in customer_pages:
-            source_doc = page_info['doc_obj']
-            page_num = page_info['page_num']
-            merged_doc.insert_pdf(source_doc, from_page=page_num, to_page=page_num)
-
-        # Save merged document
-        safe_ref = consignee_ref.replace('/', '_')
-        safe_name = re.sub(r'[<>:"/\\|?*]', '_', full_name)
-        output_filename = f"{safe_ref}_{safe_name}.pdf"
-        output_path = self.output_folder / output_filename
-
-        # NEW: Scan for tax keywords before saving
-        self.scan_for_tax_keywords(merged_doc, full_name, consignee_ref)
-
-        try:
-            # Save the merged document
-            merged_doc.save(output_path)
-            original_size = output_path.stat().st_size / (1024 * 1024)  # MB
-            
-            # Optimize if enabled
-            if self.enable_optimization:
-                self.logger.info(f"Optimizing merged document: {output_filename}")
-                
-                # FIXED: Get the optimization result as a dictionary
-                optimization_result = self.optimizer.optimize_pdf(str(output_path), str(output_path))
-                
-                if optimization_result and optimization_result.get('optimized'):
-                    # Extract the final size from the result dictionary
-                    final_size = optimization_result['final_size_mb']
-                    savings = optimization_result['savings_mb']
-                    
-                    # Update optimization stats
-                    self.optimization_stats['files_optimized'] += 1
-                    self.optimization_stats['total_savings_mb'] += savings
-                    
-                    # Store compression data for reporting
-                    self.compression_report.append({
-                        'filename': output_filename,
-                        'original_size_mb': optimization_result['original_size_mb'],
-                        'final_size_mb': final_size,
-                        'savings_mb': savings
-                    })
-                    
-                    self.logger.info(f"✅ Saved merged document: {output_filename} ({final_size:.2f}MB, saved {savings:.2f}MB)")
-                
-                elif optimization_result:
-                    # File didn't need optimization (already small enough)
-                    final_size = optimization_result['final_size_mb']
-                    self.logger.info(f"✅ Saved merged document: {output_filename} ({final_size:.2f}MB, no optimization needed)")
-                    
-                else:
-                    # Optimization failed
-                    self.logger.warning(f"Optimization failed for {output_filename}, keeping original")
-                    final_size = original_size
-            else:
-                final_size = original_size
-                self.logger.info(f"✅ Saved merged document: {output_filename} ({final_size:.2f}MB)")
-            
-            merged_doc.close()
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Error saving merged document for {consignee_ref}: {e}")
-            merged_doc.close()
-            return False
-
-    def process_all_documents(self):
-        """Main process: analyze all PDFs and merge by EDI client list ONLY"""
-        pdf_files = list(self.input_folder.glob("*.pdf"))
-        
-        if not pdf_files:
-            self.logger.error("No PDF files found!")
-            return
-                
-        # CRITICAL: Only proceed if we have an EDI manifest
-        if not self.manifest:
-            self.logger.error("No EDI manifest loaded! Cannot process without client list.")
-            return
-        
-        self.logger.info(f"Found {len(pdf_files)} PDF files to process")
-        self.logger.info(f"EDI manifest contains {len(self.manifest)} clients")
-        
-        opened_docs = []  # Keep track of opened documents
-        
-        # Process each PDF file
-        for pdf_path in pdf_files:
-            filename = pdf_path.name.lower()
-            
-            if 'advice' in filename:
-                doc = self.process_multi_client_document(pdf_path, 'Advice of Arrivals')
-                if doc:
-                    opened_docs.append(doc)
-            elif 'bill' in filename or 'lading' in filename:
-                doc = self.process_multi_client_document(pdf_path, 'Bill of Lading')
-                if doc:
-                    opened_docs.append(doc)
-            else:
-                # Assume it's a customer document
-                doc = self.process_customer_document_edi_first(pdf_path)
-                if doc:
-                    opened_docs.append(doc)
-        
-        # ONLY merge documents for EDI clients
-        edi_clients_processed = 0
-        
-        self.logger.info(f"MERGING DOCUMENTS FOR {len(self.manifest)} EDI CLIENTS")
-        
-        for edi_ref, edi_name in self.manifest.items():
-            # Check if this EDI client has any documents
-            if edi_ref in self.clients and self.clients[edi_ref]['pages']:
-                self.logger.info(f"Processing EDI client: {edi_ref} - {edi_name}")
-                
-                # Ensure we use the EDI name as authoritative
-                self.clients[edi_ref]['info'] = (edi_ref, edi_name)
-                
-                success = self.merge_client_documents(edi_ref, self.clients[edi_ref])
-                if success:
-                    edi_clients_processed += 1
-            else:
-                self.logger.warning(f"No documents found for EDI client: {edi_ref} - {edi_name}")
-        
-        # Close all opened documents
-        for doc in opened_docs:
-            doc.close()
-        
-        # Update average compression ratio
-        if self.enable_optimization and self.optimization_stats['files_optimized'] > 0:
-            total_original = sum(item['original_size_mb'] for item in self.compression_report)
-            total_final = sum(item['final_size_mb'] for item in self.compression_report)
-            self.optimization_stats['average_compression_ratio'] = total_original / total_final if total_final > 0 else 1
-        
-        # NEW: Generate and save reports
-        self.logger.info("📊 Generating reports...")
-        
-        # Print reports to console
-        print("\n" + self.generate_compression_report())
-        print("\n" + self.generate_tax_alert_report())
-        
-        # Save reports to files
-        compression_file, tax_file = self.save_reports_to_file(self.output_folder)
-        
-        self.logger.info(f"✅ Process complete! Check the '{self.output_folder.name}' folder for merged PDFs.")
-        self.logger.info(f"📊 EDI clients: {len(self.manifest)} | Processed: {edi_clients_processed}")
-        
-        if self.tax_alerts:
-            self.logger.warning(f"🚨 TAX ALERTS: {len(self.tax_alerts)} clients flagged for review!")
-        else:
-            self.logger.info("✅ No tax-relevant keywords found.")
-
-def parse_command_line():
-    """Parse command line arguments with optimization options"""
-    parser = argparse.ArgumentParser(description='PDF Merger - Merge shipping documents by client')
-    
-    # Required arguments
-    parser.add_argument('--input-folder', required=True,
-                    help='Folder containing PDF files to merge')
-    parser.add_argument('--output-folder', required=True,
-                    help='Folder to save merged PDF files')
-    
-    # Optional arguments for manifest
-    parser.add_argument('--edi-file',
-                    help='EDI Excel file (.xls or .xlsx) for client manifest')
-    parser.add_argument('--reference-doc',
-                    help='Reference PDF document to extract client manifest')
-    parser.add_argument('--manifest-file',
-                    help='Existing CSV manifest file')
-    
-    # Optimization options
-    parser.add_argument('--enable-optimization', action='store_true', default=True,
-                    help='Enable PDF optimization (default: enabled)')
-    parser.add_argument('--disable-optimization', action='store_true',
-                    help='Disable PDF optimization')
-    parser.add_argument('--target-size', type=float, default=1.2,
-                    help='Target file size in MB (default: 1.2)')
-    parser.add_argument('--quality', type=int, default=85,
-                    help='Image quality 0-100 (default: 85)')
-    
-    # Optional settings
-    parser.add_argument('--job-id',
-                    help='Job ID for web application processing')
-    parser.add_argument('--json-output', action='store_true',
-                    help='Output results as JSON (for web application)')
-    
-    return parser.parse_args()
-
-
-if __name__ == "__main__":
-    # Parse command line arguments
-    args = parse_command_line()
-    
-    # Set up logging FIRST
-    logger = setup_logging(args.job_id)
-    
-    # Check if input folder exists
-    if not Path(args.input_folder).exists():
-        logger.error(f"Input folder does not exist: {args.input_folder}")
-        print(f"❌ Error: Input folder does not exist: {args.input_folder}")
-        sys.exit(1)
-    
-    # Determine optimization settings
-    enable_optimization = args.enable_optimization and not args.disable_optimization
-    
-    # Create PDF merger with command line arguments
-    try:
-        logger.info("Creating PDF merger instance")
-        pdf_merger = PDFMerger(
-            input_folder=args.input_folder,
-            output_folder=args.output_folder,
-            edi_file=args.edi_file,
-            reference_doc=args.reference_doc,
-            enable_optimization=enable_optimization,
-            target_size_mb=args.target_size
-        )
-        
-        # Load manifest file if specified
-        if args.manifest_file:
-            logger.info(f"Loading manifest file: {args.manifest_file}")
-            pdf_merger.load_manifest(args.manifest_file)
-        
-        # Process documents
-        logger.info("Starting document processing")
-        pdf_merger.process_all_documents()
-        
-        # Get final statistics
-        total_clients = len(pdf_merger.clients)
-        
-        # Include optimization stats in output
-        result_stats = {
-            'processed_files': len(list(Path(args.input_folder).glob("*.pdf"))),
-            'merged_clients': total_clients,
-            'optimization': pdf_merger.optimization_stats if enable_optimization else None
+        if (job.type === 'merger') {
+            this.metrics.mergerJobs++;
+        } else if (job.type === 'form-processor') {
+            this.metrics.formProcessorJobs++;
         }
         
-        # Simple success message
-        if args.json_output:
-            import json
-            result = {
-                'success': True,
-                'message': 'Processing completed successfully',
-                'output_folder': args.output_folder,
-                'stats': result_stats
-            }
-            print(json.dumps(result))
-        else:
-            print(f"\n✅ Processing complete! Check the '{args.output_folder}' folder for merged PDFs.")
-            
-            if enable_optimization:
-                opt_stats = pdf_merger.optimization_stats
-                print(f"🗜️ Optimization Summary:")
-                print(f"   Files optimized: {opt_stats['files_optimized']}")
-                print(f"   Total space saved: {opt_stats['total_savings_mb']:.2f} MB")
-                if opt_stats['files_optimized'] > 0:
-                    print(f"   Average compression: {opt_stats['average_compression_ratio']:.2f}x")
+        this.activeJobs.delete(jobId);
         
-        logger.info("=== PDF Merger Completed Successfully ===")
+        console.log(`✅ Completed ${job.type} job: ${jobId} (${duration.toFixed(2)}ms)`);
+        return job;
+    }
     
-    except Exception as e:
-        error_msg = f"Processing failed: {str(e)}"
-        logger.error(error_msg)
-        logger.error("=== PDF Merger Failed ===")
+    failJob(jobId, error) {
+        const job = this.activeJobs.get(jobId);
+        if (!job) return null;
         
-        if args.json_output:
-            import json
-            print(json.dumps({'success': False, 'error': error_msg}))
-        else:
-            print(f"❌ {error_msg}")
-        sys.exit(1)
+        const duration = performance.now() - job.startTime;
+        job.duration = duration;
+        job.status = 'failed';
+        job.error = error.message || error;
+        
+        this.metrics.totalRequests++;
+        this.metrics.failedRequests++;
+        
+        this.metrics.errors.push({
+            jobId,
+            type: job.type,
+            error: job.error,
+            timestamp: new Date().toISOString()
+        });
+        
+        if (this.metrics.errors.length > 50) {
+            this.metrics.errors = this.metrics.errors.slice(-50);
+        }
+        
+        this.activeJobs.delete(jobId);
+        
+        console.log(`❌ Failed ${job.type} job: ${jobId} - ${job.error}`);
+        return job;
+    }
+    
+    getMetrics() {
+        const uptime = Date.now() - this.metrics.startTime;
+        const successRate = this.metrics.totalRequests > 0 ? 
+            (this.metrics.successfulRequests / this.metrics.totalRequests * 100).toFixed(2) : 0;
+        
+        return {
+            ...this.metrics,
+            uptime: uptime,
+            uptimeHours: (uptime / (1000 * 60 * 60)).toFixed(2),
+            successRate: `${successRate}%`,
+            activeJobs: this.activeJobs.size,
+            currentTime: new Date().toISOString()
+        };
+    }
+    
+    getHealthStatus() {
+        const metrics = this.getMetrics();
+        const recentErrors = this.metrics.errors.filter(
+            error => Date.now() - new Date(error.timestamp).getTime() < 60000
+        );
+        
+        const isHealthy = recentErrors.length === 0 && parseFloat(metrics.successRate) > 95;
+        
+        return {
+            status: isHealthy ? 'healthy' : 'degraded',
+            uptime: metrics.uptimeHours + ' hours',
+            successRate: metrics.successRate,
+            activeJobs: metrics.activeJobs,
+            recentErrors: recentErrors.length,
+            lastCheck: new Date().toISOString()
+        };
+    }
+}
+
+// Create global performance monitor
+const performanceMonitor = new SimplePerformanceMonitor();
+
+// Enhanced logging
+const logger = winston.createLogger({
+    level: 'info',
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.errors({ stack: true }),
+        winston.format.json()
+    ),
+    transports: [
+        new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
+        new winston.transports.File({ filename: 'logs/combined.log' }),
+        new winston.transports.Console({
+            format: winston.format.simple()
+        })
+    ]
+});
+
+// Security and performance middleware
+app.use(helmet({
+    contentSecurityPolicy: false
+}));
+app.use(compression());
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Rate limiting
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 100
+});
+app.use('/api/', limiter);
+
+// Ensure directories exist
+const ensureDirectories = async () => {
+    const dirs = [
+        'uploads', 'outputs', 'signatures', 'logs', 
+        'merger-uploads', 'merger-outputs', 'manifests'
+    ];
+    
+    for (const dir of dirs) {
+        await fs.ensureDir(dir);
+    }
+};
+
+// Check signature file
+const ensureSignature = async () => {
+    if (!await fs.pathExists(SIGNATURE_PATH)) {
+        logger.warn(`⚠️  Default signature not found at: ${SIGNATURE_PATH}`);
+        console.log('📝 Place your signature image at:', SIGNATURE_PATH);
+        console.log('💡 Supported formats: PNG, JPG, GIF');
+    } else {
+        logger.info('✅ Default signature loaded');
+        console.log('✅ Default signature found');
+    }
+};
+
+// Configure multer for different file types
+const createMulterStorage = (destination) => {
+    return multer({
+        storage: multer.diskStorage({
+            destination: (req, file, cb) => {
+                cb(null, destination);
+            },
+            filename: (req, file, cb) => {
+                const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+                cb(null, uniqueSuffix + '-' + file.originalname);
+            }
+        }),
+        limits: {
+            fileSize: 100 * 1024 * 1024 // 100MB limit
+        },
+        fileFilter: (req, file, cb) => {
+            const allowedTypes = /\.(pdf|xls|xlsx|png|jpg|jpeg|gif)$/i;
+            if (allowedTypes.test(file.originalname)) {
+                cb(null, true);
+            } else {
+                cb(new Error('Only PDF, Excel, and image files are allowed'));
+            }
+        }
+    });
+};
+
+const uploadProcessor = createMulterStorage('uploads');
+const uploadMerger = createMulterStorage('merger-uploads');
+
+// Serve static files
+app.use(express.static('public'));
+
+// ==================== FORM PROCESSOR ROUTES ====================
+
+// Form processor upload endpoint
+app.post('/api/upload', uploadProcessor.array('files'), async (req, res) => {
+    try {
+        logger.info(`Form processor upload: ${req.files.length} files`);
+        
+        const processedFiles = req.files.map(file => ({
+            id: uuidv4(),
+            originalName: file.originalname,
+            filename: file.filename,
+            path: file.path,
+            size: file.size
+        }));
+
+        // Check if signature exists
+        const signatureExists = await fs.pathExists(SIGNATURE_PATH);
+
+        res.json({
+            success: true,
+            files: processedFiles,
+            signatureAvailable: signatureExists,
+            message: `Uploaded ${req.files.length} files successfully`
+        });
+    } catch (error) {
+        logger.error('Upload error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Form processor process endpoint - NOW PROPERLY INTEGRATED
+app.post('/api/process', async (req, res) => {
+    const trackingJobId = `form_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const job = performanceMonitor.startJob('form-processor', trackingJobId, {
+        fileCount: req.body.files?.length || 0,
+        overlays: req.body.overlays?.length || 0
+    });
+
+    try {
+        const { files, overlays, settings } = req.body;
+        logger.info(`Processing ${files.length} files with form overlay`);
+
+        const jobId = uuidv4();
+        const outputDir = path.join('outputs', jobId);
+        await fs.ensureDir(outputDir);
+
+        // Initialize the text overlay processor
+        const processor = new TextOverlayProcessor();
+        
+        // Configure overlays if provided
+        if (overlays && overlays.length > 0) {
+            // Convert frontend overlay format to processor format
+            const overlayConfig = overlays.map(overlay => ({
+                name: overlay.name || 'customOverlay',
+                x: overlay.x || 100,
+                y: overlay.y || 100,
+                text: overlay.text || '',
+                description: overlay.description || 'Custom overlay'
+            }));
+            
+            // Update processor overlay configuration
+            processor.overlayConfig.fields = overlayConfig;
+        }
+
+        // Copy uploaded files to a temporary processing directory
+        const tempInputDir = path.join('uploads', 'temp_' + jobId);
+        await fs.ensureDir(tempInputDir);
+
+        const processedFiles = [];
+        for (const file of files) {
+            const originalPath = path.join('uploads', file.filename || file.originalName);
+            const tempPath = path.join(tempInputDir, file.originalName);
+            
+            if (await fs.pathExists(originalPath)) {
+                await fs.copy(originalPath, tempPath);
+                processedFiles.push({
+                    originalName: file.originalName,
+                    tempPath: tempPath
+                });
+            }
+        }
+
+        // Process the PDFs using your existing textOverlay processor
+        const result = await processor.processBatch(tempInputDir, outputDir);
+
+        // Clean up temporary directory
+        await fs.remove(tempInputDir);
+
+        // Complete the performance tracking
+        const completedJob = performanceMonitor.completeJob(trackingJobId, result);
+
+        res.json({
+            success: true,
+            jobId: jobId,
+            processedFiles: result.successFiles || processedFiles,
+            downloadUrl: `/api/download/${jobId}`,
+            performance: {
+                duration: completedJob.duration,
+                filesPerSecond: (result.successful || 0) / (completedJob.duration / 1000)
+            },
+            stats: {
+                processed: result.processed || 0,
+                successful: result.successful || 0,
+                failed: result.failed || 0
+            }
+        });
+
+    } catch (error) {
+        performanceMonitor.failJob(trackingJobId, error);
+        logger.error('Form processing error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ==================== DOCUMENT MERGER ROUTES ====================
+
+// Upload files for merger
+app.post('/api/merger/upload', uploadMerger.fields([
+    { name: 'pdfFiles', maxCount: 50 },
+    { name: 'ediFile', maxCount: 1 },
+    { name: 'referenceDoc', maxCount: 1 }
+]), async (req, res) => {
+    try {
+        logger.info('Merger upload request received');
+        
+        const uploadedFiles = {
+            pdfFiles: [],
+            ediFile: null,
+            referenceDoc: null
+        };
+
+        if (req.files.pdfFiles) {
+            uploadedFiles.pdfFiles = req.files.pdfFiles.map(file => ({
+                id: uuidv4(),
+                originalName: file.originalname,
+                filename: file.filename,
+                path: file.path,
+                size: file.size
+            }));
+        }
+
+        if (req.files.ediFile && req.files.ediFile[0]) {
+            const file = req.files.ediFile[0];
+            uploadedFiles.ediFile = {
+                id: uuidv4(),
+                originalName: file.originalname,
+                filename: file.filename,
+                path: file.path,
+                size: file.size
+            };
+        }
+
+        if (req.files.referenceDoc && req.files.referenceDoc[0]) {
+            const file = req.files.referenceDoc[0];
+            uploadedFiles.referenceDoc = {
+                id: uuidv4(),
+                originalName: file.originalname,
+                filename: file.filename,
+                path: file.path,
+                size: file.size
+            };
+        }
+
+        logger.info(`Merger upload successful: ${uploadedFiles.pdfFiles.length} PDFs, EDI: ${!!uploadedFiles.ediFile}`);
+
+        res.json({
+            success: true,
+            files: uploadedFiles,
+            message: 'Files uploaded successfully for merger'
+        });
+
+    } catch (error) {
+        logger.error('Merger upload error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Process manifest from uploaded files
+app.post('/api/merger/process-manifest', async (req, res) => {
+    try {
+        const { ediFilePath, referenceDocPath } = req.body;
+        logger.info('Processing manifest from uploaded files');
+
+        let manifest = {};
+
+        if (ediFilePath && await fs.pathExists(ediFilePath)) {
+            manifest = await processEdiFile(ediFilePath);
+        } else if (referenceDocPath && await fs.pathExists(referenceDocPath)) {
+            manifest = await processReferenceDocument(referenceDocPath);
+        }
+
+        const manifestId = uuidv4();
+        const manifestPath = path.join('manifests', `manifest_${manifestId}.csv`);
+        await saveManifestAsCsv(manifest, manifestPath);
+
+        res.json({
+            success: true,
+            manifest: manifest,
+            manifestId: manifestId,
+            manifestPath: manifestPath,
+            count: Object.keys(manifest).length
+        });
+
+    } catch (error) {
+        logger.error('Manifest processing error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+
+
+// Download merged files
+app.get('/api/merger/download/:jobId', async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        const outputDir = path.join('merger-outputs', jobId);
+
+        if (!await fs.pathExists(outputDir)) {
+            return res.status(404).json({ error: 'Job not found' });
+        }
+
+        const zipPath = path.join('merger-outputs', `${jobId}_merged.zip`);
+        const output = fs.createWriteStream(zipPath);
+        const archive = archiver('zip', { zlib: { level: 9 } });
+
+        archive.pipe(output);
+
+        const files = await fs.readdir(outputDir);
+        const pdfFiles = files.filter(file => file.endsWith('.pdf'));
+
+        for (const file of pdfFiles) {
+            const filePath = path.join(outputDir, file);
+            archive.file(filePath, { name: file });
+        }
+
+        await archive.finalize();
+        await new Promise((resolve) => output.on('close', resolve));
+
+        res.download(zipPath, `merged_documents_${jobId}.zip`, (err) => {
+            if (err) {
+                logger.error('Download error:', err);
+            }
+            fs.remove(zipPath).catch(console.error);
+        });
+
+    } catch (error) {
+        logger.error('Download error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Add this new endpoint after your existing /api/merger/process endpoint in server.js
+
+// Main merger processing endpoint with page 9 overlays
+app.post('/api/merger/process', async (req, res) => {
+    const trackingJobId = `merger_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const job = performanceMonitor.startJob('merger', trackingJobId, {
+        fileCount: req.body.files?.pdfFiles?.length || 0,
+        hasEdi: !!req.body.files?.ediFile,
+        settings: req.body.settings,
+        applyOverlays: req.body.settings?.applyPage9Overlays || false
+    });
+    
+    try {
+        const { files, settings, manifestPath } = req.body;
+        logger.info(`Starting enhanced merger process with ${files.pdfFiles?.length || 0} PDF files`);
+
+        const jobId = uuidv4();
+        const outputDir = path.join('merger-outputs', jobId);
+        const tempOverlayDir = path.join('outputs', `overlay_${jobId}`);
+        
+        await fs.ensureDir(outputDir);
+        await fs.ensureDir(tempOverlayDir);
+
+        // Step 1: Run Python merger first
+        const pythonOptions = {
+            mode: 'text',
+            pythonPath: '/Users/matthewforan/SevenSeas_Code_Project/pdf-tools-suite-1/.venv/bin/python',
+            scriptPath: path.join(__dirname, 'python-scripts'),
+            args: [
+                '--input-folder', 'merger-uploads',
+                '--output-folder', outputDir,
+                '--job-id', jobId,
+                '--json-output'
+            ]
+        };
+
+        if (manifestPath && await fs.pathExists(manifestPath)) {
+            pythonOptions.args.push('--manifest-file', manifestPath);
+        }
+
+        // Add EDI file if exists
+        if (files.ediFile && await fs.pathExists(files.ediFile.path)) {
+            pythonOptions.args.push('--edi-file', files.ediFile.path);
+        }
+
+      logger.info('Running Python merger with child_process...');
+
+        const pythonArgs = [
+            'python-scripts/pdf_merger.py',
+            '--input-folder', 'merger-uploads',
+            '--output-folder', outputDir,
+            '--job-id', jobId,
+            '--json-output'
+        ];
+
+        if (manifestPath && await fs.pathExists(manifestPath)) {
+            pythonArgs.push('--manifest-file', manifestPath);
+        }
+
+        if (files.ediFile && await fs.pathExists(files.ediFile.path)) {
+            pythonArgs.push('--edi-file', files.ediFile.path);
+        }
+
+        logger.info('Python command:', pythonArgs.join(' '));
+
+        const mergerResults = await new Promise((resolve, reject) => {
+            const python = spawn('./.venv/bin/python', pythonArgs);
+            
+            let stdout = '';
+            let stderr = '';
+            
+            python.stdout.on('data', (data) => {
+                const output = data.toString();
+                stdout += output;
+                logger.info('Python stdout:', output.trim());
+            });
+            
+            python.stderr.on('data', (data) => {
+                const error = data.toString();
+                stderr += error;
+                logger.error('Python stderr:', error.trim());
+            });
+            
+            python.on('close', (code) => {
+                logger.info(`Python process finished with code: ${code}`);
+                
+                if (code !== 0) {
+                    reject(new Error(`Python script failed with code ${code}: ${stderr}`));
+                } else {
+                    // Find JSON output in stdout
+                    const lines = stdout.split('\n');
+                    const jsonLine = lines.find(line => line.trim().startsWith('{'));
+                    
+                    if (jsonLine) {
+                        try {
+                            const result = JSON.parse(jsonLine);
+                            logger.info('Parsed Python result:', result);
+                            resolve(result);
+                        } catch (e) {
+                            logger.error('JSON parse error:', e);
+                            resolve({ success: true, message: 'Completed but parse failed' });
+                        }
+                    } else {
+                        logger.warning('No JSON output found');
+                        resolve({ success: true, message: 'Completed successfully' });
+                    }
+                }
+            });
+            
+            // Add timeout
+            setTimeout(() => {
+                python.kill();
+                reject(new Error('Python process timeout'));
+            }, 5 * 60 * 1000); // 5 minute timeout
+        });
+
+        // Step 2: Apply page 9 overlays if requested
+        if (settings?.applyPage9Overlays) {
+            logger.info('Applying page 9 overlays to merged documents...');
+            
+            // Get all merged PDF files
+            const mergedFiles = await fs.readdir(outputDir);
+            const pdfFiles = mergedFiles.filter(file => file.endsWith('.pdf'));
+            
+            if (pdfFiles.length > 0) {
+                // Initialize text overlay processor
+                // Remove this line:
+            // const TextOverlayProcessor = require('./textOverlay.js');
+
+            // And replace with (since you already imported it at the top):
+            const overlayProcessor = new TextOverlayProcessor();
+                
+                // Extract shipment data from the first PDF file
+                const firstPdfPath = path.join(outputDir, pdfFiles[0]);
+                await overlayProcessor.extractShipmentData(firstPdfPath);
+                
+                if (overlayProcessor.shipmentData) {
+                    logger.info(`Extracted shipment data: Container ${overlayProcessor.shipmentData.containerNumber}, Ship ${overlayProcessor.shipmentData.shipName}`);
+                    
+                    // Process each merged PDF with overlays
+                    for (const pdfFile of pdfFiles) {
+                        const inputPath = path.join(outputDir, pdfFile);
+                        const tempPath = path.join(tempOverlayDir, pdfFile);
+                        
+                        logger.info(`Applying overlays to: ${pdfFile}`);
+                        
+                         const overlayResult = await overlayProcessor.processSinglePDFWithOverlay(inputPath, tempPath);
+                        
+                        if (overlayResult.success) {
+                            // Replace original with overlay version
+                            await fs.move(tempPath, inputPath, { overwrite: true });
+                            logger.info(`✅ Applied overlays to ${pdfFile}`);
+                        } else {
+                            logger.warning(`⚠️ Failed to apply overlays to ${pdfFile}: ${overlayResult.error}`);
+                        }
+                    }
+                    
+                    mergerResults.overlaysApplied = pdfFiles.length;
+                    mergerResults.shipmentData = overlayProcessor.shipmentData;
+                } else {
+                    logger.warning('Could not extract shipment data for overlays');
+                    mergerResults.overlaysApplied = 0;
+                }
+            }
+        }
+
+        // Clean up temp overlay directory
+        await fs.remove(tempOverlayDir);
+
+        mergerResults.jobId = jobId;
+        mergerResults.downloadUrl = `/api/merger/download/${jobId}`;
+
+        logger.info(`Enhanced merger processing completed for job ${jobId}`);
+
+        const completedJob = performanceMonitor.completeJob(trackingJobId, mergerResults);
+        
+        res.json({
+            success: true,
+            jobId: jobId,
+            downloadUrl: `/api/merger/download/${jobId}`,
+            stats: {
+                merged_clients: mergerResults.stats?.merged_clients || mergerResults.merged_clients || 0,
+                processed_files: mergerResults.stats?.processed_files || mergerResults.processed_files || 0,
+                overlays_applied: mergerResults.overlaysApplied || 0
+            },
+            performance: {
+                duration: completedJob.duration,
+                filesPerSecond: (mergerResults.stats?.processed_files || mergerResults.stats?.processed || 0) / (completedJob.duration / 1000)
+            },
+            originalResults: mergerResults  // Keep full results for debugging
+        });
+
+    } catch (error) {
+        performanceMonitor.failJob(trackingJobId, error);
+        logger.error('Enhanced merger processing error:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            jobId: trackingJobId
+        });
+    }
+});
+
+// ==================== SHARED ROUTES ====================
+
+// Download processed files
+app.get('/api/download/:jobId', async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        const outputDir = path.join('outputs', jobId);
+
+        if (!await fs.pathExists(outputDir)) {
+            return res.status(404).json({ error: 'Job not found' });
+        }
+
+        const zipPath = path.join('outputs', `${jobId}_processed.zip`);
+        const output = fs.createWriteStream(zipPath);
+        const archive = archiver('zip', { zlib: { level: 9 } });
+
+        archive.pipe(output);
+        archive.directory(outputDir, false);
+        await archive.finalize();
+
+        await new Promise((resolve) => output.on('close', resolve));
+
+        res.download(zipPath, `processed_files_${jobId}.zip`, (err) => {
+            if (err) {
+                logger.error('Download error:', err);
+            }
+            fs.remove(zipPath).catch(console.error);
+        });
+
+    } catch (error) {
+        logger.error('Download error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ==================== MONITORING ENDPOINTS ====================
+
+app.get('/api/metrics', (req, res) => {
+    try {
+        const metrics = performanceMonitor.getMetrics();
+        res.json({
+            success: true,
+            metrics: metrics
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Add these new routes to your server.js after your existing routes
+
+// ==================== SMART UPLOAD ROUTES ====================
+
+// Serve the smart interface as an alternative
+app.get('/smart', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'smart.html'));
+});
+
+// Smart file analysis endpoint
+app.post('/api/smart-analyze', uploadProcessor.array('files'), async (req, res) => {
+    try {
+        logger.info(`Smart analysis: ${req.files.length} files`);
+        
+        const analysis = {
+            torForms: [],
+            adviceDocuments: [],
+            billsOfLading: [],
+            customerDocuments: [],
+            ediFiles: [],
+            signatures: [],
+            unknownPdfs: [],
+            processingMode: null,
+            recommendations: []
+        };
+
+        // Analyze each uploaded file
+        for (const file of req.files) {
+            const fileInfo = {
+                id: uuidv4(),
+                originalName: file.originalname,
+                filename: file.filename,
+                path: file.path,
+                size: file.size,
+                type: detectFileType(file.originalname)
+            };
+
+            // Categorize files
+            switch (fileInfo.type) {
+                case 'tor_form':
+                    analysis.torForms.push(fileInfo);
+                    break;
+                case 'advice_document':
+                    analysis.adviceDocuments.push(fileInfo);
+                    break;
+                case 'bill_of_lading':
+                    analysis.billsOfLading.push(fileInfo);
+                    break;
+                case 'customer_document':
+                    analysis.customerDocuments.push(fileInfo);
+                    break;
+                case 'edi_file':
+                    analysis.ediFiles.push(fileInfo);
+                    break;
+                case 'signature':
+                    analysis.signatures.push(fileInfo);
+                    break;
+                default:
+                    analysis.unknownPdfs.push(fileInfo);
+            }
+        }
+
+        // Determine processing mode
+        const hasShippingDocs = analysis.adviceDocuments.length + analysis.billsOfLading.length + analysis.customerDocuments.length > 0;
+        const hasTorForms = analysis.torForms.length > 0;
+
+        if (hasTorForms && hasShippingDocs) {
+            analysis.processingMode = 'combined';
+            analysis.recommendations.push('Process TOR forms and merge shipping documents');
+        } else if (hasTorForms) {
+            analysis.processingMode = 'form_processing';
+            analysis.recommendations.push('Add text overlays to TOR forms');
+        } else if (hasShippingDocs) {
+            analysis.processingMode = 'document_merging';
+            analysis.recommendations.push('Merge shipping documents by client');
+        } else {
+            analysis.processingMode = 'unknown';
+            analysis.recommendations.push('Manual classification required');
+        }
+
+        // Store analysis for later processing
+        const analysisId = uuidv4();
+        const analysisPath = path.join('manifests', `analysis_${analysisId}.json`);
+        await fs.writeJson(analysisPath, analysis);
+
+        res.json({
+            success: true,
+            analysis: analysis,
+            analysisId: analysisId,
+            message: `Analyzed ${req.files.length} files successfully`
+        });
+
+    } catch (error) {
+        logger.error('Smart analysis error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Smart auto-processing endpoint
+app.post('/api/smart-process', async (req, res) => {
+    const trackingJobId = `smart_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const job = performanceMonitor.startJob('smart-processor', trackingJobId);
+
+    try {
+        const { analysisId, settings } = req.body;
+        
+        // Load the analysis
+        const analysisPath = path.join('manifests', `analysis_${analysisId}.json`);
+        if (!await fs.pathExists(analysisPath)) {
+            throw new Error('Analysis not found');
+        }
+        
+        const analysis = await fs.readJson(analysisPath);
+        logger.info(`Smart processing: ${analysis.processingMode} mode`);
+
+        const results = {};
+        const jobId = uuidv4();
+
+        // Process TOR forms if any
+        if (analysis.torForms.length > 0) {
+            logger.info(`Processing ${analysis.torForms.length} TOR forms`);
+            
+            const formJobId = `forms_${jobId}`;
+            const formOutputDir = path.join('outputs', formJobId);
+            await fs.ensureDir(formOutputDir);
+
+            // Initialize text overlay processor
+            const processor = new TextOverlayProcessor();
+            
+            // Create temporary input directory
+            const tempInputDir = path.join('uploads', 'temp_forms_' + formJobId);
+            await fs.ensureDir(tempInputDir);
+
+            // Copy TOR form files to temp directory
+            for (const torForm of analysis.torForms) {
+                const sourcePath = torForm.path;
+                const destPath = path.join(tempInputDir, torForm.originalName);
+                if (await fs.pathExists(sourcePath)) {
+                    await fs.copy(sourcePath, destPath);
+                }
+            }
+
+            // Process the forms
+            const formResult = await processor.processBatch(tempInputDir, formOutputDir);
+            
+            // Clean up temp directory
+            await fs.remove(tempInputDir);
+            
+            results.formProcessing = {
+                success: true,
+                jobId: formJobId,
+                downloadUrl: `/api/download/${formJobId}`,
+                stats: formResult
+            };
+        }
+
+        // Process document merging if needed
+        if (analysis.adviceDocuments.length + analysis.billsOfLading.length + analysis.customerDocuments.length > 0) {
+            logger.info('Processing document merging');
+            
+            const mergerJobId = `merger_${jobId}`;
+            const mergerOutputDir = path.join('merger-outputs', mergerJobId);
+            await fs.ensureDir(mergerOutputDir);
+
+            // Copy relevant files to merger-uploads
+            const mergerInputDir = path.join('merger-uploads', 'temp_' + mergerJobId);
+            await fs.ensureDir(mergerInputDir);
+
+            // Copy shipping documents
+            const allShippingDocs = [
+                ...analysis.adviceDocuments,
+                ...analysis.billsOfLading,
+                ...analysis.customerDocuments
+            ];
+
+            for (const doc of allShippingDocs) {
+                if (await fs.pathExists(doc.path)) {
+                    await fs.copy(doc.path, path.join(mergerInputDir, doc.originalName));
+                }
+            }
+
+            // Copy EDI file if exists
+            let ediPath = null;
+            if (analysis.ediFiles.length > 0) {
+                const ediFile = analysis.ediFiles[0];
+                ediPath = path.join(mergerInputDir, ediFile.originalName);
+                if (await fs.pathExists(ediFile.path)) {
+                    await fs.copy(ediFile.path, ediPath);
+                }
+            }
+
+            // Run Python merger
+            const pythonOptions = {
+                mode: 'text',
+                pythonPath: '/Users/matthewforan/SevenSeas_Code_Project/pdf-tools-suite-1/.venv/bin/python',
+                scriptPath: path.join(__dirname, 'python-scripts'),
+                args: [
+                    '--input-folder', mergerInputDir,
+                    '--output-folder', mergerOutputDir,
+                    '--job-id', mergerJobId,
+                    '--json-output'
+                ]
+            };
+
+            if (ediPath) {
+                pythonOptions.args.push('--edi-file', ediPath);
+            }
+
+            const mergerResults = await new Promise((resolve, reject) => {
+                PythonShell.run('pdf_merger.py', pythonOptions, (err, results) => {
+                    if (err) {
+                        logger.error('Python merger error:', err);
+                        reject(err);
+                    } else {
+                        try {
+                            const lastLine = results[results.length - 1];
+                            const result = JSON.parse(lastLine);
+                            resolve(result);
+                        } catch (parseErr) {
+                            logger.error('Failed to parse merger results:', parseErr);
+                            resolve({
+                                success: true,
+                                message: 'Merging completed, but could not parse detailed results'
+                            });
+                        }
+                    }
+                });
+            });
+
+            // Clean up temp directory
+            await fs.remove(mergerInputDir);
+
+            results.documentMerging = {
+                success: true,
+                jobId: mergerJobId,
+                downloadUrl: `/api/merger/download/${mergerJobId}`,
+                stats: mergerResults
+            };
+        }
+
+        // Complete tracking
+        const completedJob = performanceMonitor.completeJob(trackingJobId, results);
+
+        res.json({
+            success: true,
+            results: results,
+            processingMode: analysis.processingMode,
+            performance: {
+                duration: completedJob.duration,
+                mode: analysis.processingMode
+            },
+            downloadUrls: generateDownloadUrls(results)
+        });
+
+    } catch (error) {
+        performanceMonitor.failJob(trackingJobId, error);
+        logger.error('Smart processing error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Generate download URLs based on processing results
+function generateDownloadUrls(results) {
+    const urls = [];
+    
+    if (results.formProcessing && results.formProcessing.success) {
+        urls.push({
+            type: 'Form Processing Results',
+            url: results.formProcessing.downloadUrl,
+            description: 'TOR forms with text overlays'
+        });
+    }
+    
+    if (results.documentMerging && results.documentMerging.success) {
+        urls.push({
+            type: 'Merged Documents',
+            url: results.documentMerging.downloadUrl,
+            description: 'Shipping documents merged by client'
+        });
+    }
+    
+    return urls;
+}
+
+// File type detection utility
+function detectFileType(filename) {
+    const name = filename.toLowerCase();
+    
+    if (name.includes('tor') || name.includes('declaration')) {
+        return 'tor_form';
+    } else if (name.includes('advice') || name.includes('arrival')) {
+        return 'advice_document';
+    } else if (name.includes('bill') || name.includes('lading')) {
+        return 'bill_of_lading';
+    } else if (name.endsWith('.xls') || name.endsWith('.xlsx')) {
+        return 'edi_file';
+    } else if (/\d{3}[-\/]\d{3}[-\/]\d{3}/.test(name)) {
+        return 'customer_document';
+    } else if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.gif')) {
+        return 'signature';
+    } else if (name.endsWith('.pdf')) {
+        return 'unknown_pdf';
+    }
+    
+    return 'unknown';
+}
+
+// Health check endpoint specifically for smart mode
+app.get('/api/smart/health', (req, res) => {
+    try {
+        const health = performanceMonitor.getHealthStatus();
+        const signatureExists = fs.existsSync(SIGNATURE_PATH);
+        
+        res.json({
+            ...health,
+            smartMode: {
+                status: 'active',
+                features: [
+                    'Auto file detection',
+                    'Smart processing mode selection',
+                    'Combined form processing and document merging'
+                ]
+            },
+            services: {
+                formProcessor: 'active',
+                documentMerger: 'active',
+                signature: signatureExists ? 'available' : 'missing',
+                smartAnalysis: 'active'
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            status: 'error', 
+            error: error.message 
+        });
+    }
+});
+
+app.get('/api/health', (req, res) => {
+    try {
+        const health = performanceMonitor.getHealthStatus();
+        const signatureExists = fs.existsSync(SIGNATURE_PATH);
+        
+        res.json({
+            ...health,
+            services: {
+                formProcessor: 'active',
+                documentMerger: 'active',
+                signature: signatureExists ? 'available' : 'missing'
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            status: 'error', 
+            error: error.message 
+        });
+    }
+});
+
+app.get('/api/system-info', (req, res) => {
+    try {
+        const metrics = performanceMonitor.getMetrics();
+        
+        res.json({
+            application: {
+                name: 'PDF Tools Suite',
+                version: '2.0.0',
+                uptime: metrics.uptimeHours + ' hours',
+                startTime: new Date(metrics.startTime).toISOString()
+            },
+            performance: {
+                totalRequests: metrics.totalRequests,
+                successfulRequests: metrics.successfulRequests,
+                failedRequests: metrics.failedRequests,
+                successRate: metrics.successRate,
+                averageProcessingTime: metrics.averageProcessingTime.toFixed(2) + 'ms'
+            },
+            jobs: {
+                mergerJobs: metrics.mergerJobs,
+                formProcessorJobs: metrics.formProcessorJobs,
+                activeJobs: metrics.activeJobs
+            },
+            system: {
+                memoryUsage: process.memoryUsage(),
+                platform: process.platform,
+                nodeVersion: process.version,
+                currentTime: new Date().toISOString()
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/info', (req, res) => {
+    res.json({
+        name: 'PDF Processor & Merger Suite',
+        version: '2.0.0',
+        features: [
+            'PDF Form Filling',
+            'Document Merging',
+            'Batch Processing',
+            'Manifest Management'
+        ]
+    });
+});
+
+// ==================== UTILITY FUNCTIONS ====================
+
+async function processEdiFile(filePath) {
+    try {
+        const workbook = XLSX.readFile(filePath);
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const data = XLSX.utils.sheet_to_json(worksheet);
+
+        const manifest = {};
+        
+        data.forEach(row => {
+            const consigneeRef = row['Consignees Reference'] || row['Reference'];
+            const consigneeName = row['Consignees Name'] || row['Name'];
+            
+            if (consigneeRef && consigneeName) {
+                manifest[consigneeRef.toString().trim()] = consigneeName.toString().trim();
+            }
+        });
+
+        logger.info(`Processed EDI file: ${Object.keys(manifest).length} entries`);
+        return manifest;
+
+    } catch (error) {
+        logger.error('EDI processing error:', error);
+        throw error;
+    }
+}
+
+async function processReferenceDocument(filePath) {
+    logger.info('Reference document processing not yet implemented');
+    return {};
+}
+
+async function saveManifestAsCsv(manifest, filePath) {
+    const csvWriter = createCsvWriter({
+        path: filePath,
+        header: [
+            { id: 'reference', title: 'ConsigneeRef' },
+            { id: 'name', title: 'FullName' }
+        ]
+    });
+
+    const records = Object.entries(manifest).map(([ref, name]) => ({
+        reference: ref,
+        name: name
+    }));
+
+    await csvWriter.writeRecords(records);
+    logger.info(`Manifest saved to ${filePath} with ${records.length} entries`);
+}
+
+// Cleanup old files (daily at 2 AM)
+cron.schedule('0 2 * * *', async () => {
+    logger.info('Starting daily cleanup');
+    
+    const cleanupDirs = ['uploads', 'outputs', 'merger-uploads', 'merger-outputs'];
+    const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
+    
+    for (const dir of cleanupDirs) {
+        try {
+            if (await fs.pathExists(dir)) {
+                const files = await fs.readdir(dir);
+                for (const file of files) {
+                    const filePath = path.join(dir, file);
+                    const stats = await fs.stat(filePath);
+                    
+                    if (Date.now() - stats.mtime.getTime() > maxAge) {
+                        await fs.remove(filePath);
+                        logger.info(`Cleaned up old file: ${filePath}`);
+                    }
+                }
+            }
+        } catch (error) {
+            logger.error(`Cleanup error for ${dir}:`, error);
+        }
+    }
+});
+
+// ==================== START SERVER ====================
+
+async function startServer() {
+    try {
+        await ensureDirectories();
+        await ensureSignature();
+        
+        app.listen(PORT, () => {
+            logger.info(`🚀 PDF Processor & Merger Suite running on port ${PORT}`);
+            logger.info(`📋 Form Processor: http://localhost:${PORT}`);
+            logger.info(`🚢 Document Merger: http://localhost:${PORT}#merger`);
+            logger.info(`📊 Health Check: http://localhost:${PORT}/api/health`);
+            console.log('✅ Server ready!');
+        });
+    } catch (error) {
+        logger.error('Failed to start server:', error);
+        process.exit(1);
+    }
+}
+
+startServer();
+
+module.exports = app;
