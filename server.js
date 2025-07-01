@@ -595,7 +595,7 @@ app.post('/api/merger/process', async (req, res) => {
                             resolve({ success: true, message: 'Completed but parse failed' });
                         }
                     } else {
-                        logger.warning('No JSON output found');
+                        logger.warn('No JSON output found');
                         resolve({ success: true, message: 'Completed successfully' });
                     }
                 }
@@ -645,14 +645,14 @@ app.post('/api/merger/process', async (req, res) => {
                             await fs.move(tempPath, inputPath, { overwrite: true });
                             logger.info(`✅ Applied overlays to ${pdfFile}`);
                         } else {
-                            logger.warning(`⚠️ Failed to apply overlays to ${pdfFile}: ${overlayResult.error}`);
+                            logger.warn(`⚠️ Failed to apply overlays to ${pdfFile}: ${overlayResult.error}`);
                         }
                     }
                     
                     mergerResults.overlaysApplied = pdfFiles.length;
                     mergerResults.shipmentData = overlayProcessor.shipmentData;
                 } else {
-                    logger.warning('Could not extract shipment data for overlays');
+                    logger.warn('Could not extract shipment data for overlays');
                     mergerResults.overlaysApplied = 0;
                 }
             }
