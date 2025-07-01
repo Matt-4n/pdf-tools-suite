@@ -601,24 +601,37 @@ class PDFMerger:
         
         self.logger.info("📂 Categorizing PDF files...")
         
+        # REPLACE this section in your pdf_merger.py (around lines 815-835):
+
         for pdf_path in pdf_files:
-            filename = pdf_path.name.lower()
+            filename = pdf_path.name  # Use original case, not .lower()
+            filename_lower = filename.lower()
             
-            # More precise categorization to prevent misclassification
-            if ('advice' in filename and 'arrival' in filename) or filename.startswith('advice_of_arrival'):
+            # 1. Advice of Arrival: "Advice of Arrival ICR1032499.pdf"
+            if filename_lower.startswith('advice of arrival'):
                 advice_files.append(pdf_path)
                 self.logger.info(f"   📋 Advice of Arrival: {pdf_path.name}")
-            elif (('bill' in filename and 'lading' in filename) or 
-                    'bills_of_lading' in filename or 
-                    filename.startswith('bill_of_lading') or
-                    filename.startswith('bill')):
+            
+            # 2. Bill of Lading: "000-534-000_HBL.pdf" (ends with _HBL.pdf)
+            elif filename.endswith('_HBL.pdf'):
                 bill_files.append(pdf_path)
-                self.logger.info(f"   🚢 Bill of Lading: {pdf_path.name}")
-            else:
-                # Everything else is treated as customer documents
+                self.logger.info(f"   🚢 Bill of Lading (HBL): {pdf_path.name}")
+            
+            # 3. Customer Document: "000-534-055_Document.pdf" (ends with _Document.pdf)
+            elif filename.endswith('_Document.pdf'):
                 customer_files.append(pdf_path)
                 self.logger.info(f"   👥 Customer Document: {pdf_path.name}")
-        
+            
+            # 4. Fallback for other files with client references
+            elif re.search(r'\d{3}[-/]\d{3}[-/]\d{3}', filename):
+                customer_files.append(pdf_path)
+                self.logger.info(f"   👥 Customer Document (by reference): {pdf_path.name}")
+            
+            # 5. Everything else
+            else:
+                customer_files.append(pdf_path)
+                self.logger.warning(f"   ❓ Unknown file type, treating as customer document: {pdf_path.name}")
+                
         # Summary of categorization
         self.logger.info(f"📊 File categorization complete:")
         self.logger.info(f"   📋 Advice files: {len(advice_files)}")
