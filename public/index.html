@@ -1013,6 +1013,12 @@
                 
                 if (!mergeResponse.ok) throw new Error('Merging failed');
                 const mergeResult = await mergeResponse.json();
+               
+                // Add these debugging lines:
+                console.log('🔍 Full merge result:', mergeResult);
+                console.log('🔍 Download URL:', mergeResult.downloadUrl);
+                console.log('🔍 Stats object:', mergeResult.stats);
+                console.log('🔍 Job ID:', mergeResult.jobId);
                 
                 // Complete (100%)
                 progressText.textContent = '✅ Processing complete!';
@@ -1027,18 +1033,59 @@
                 processBtn.disabled = false;
             }
         }
+        // Add this NEW function
+        function displayTaxAlerts(taxAlerts) {
+            if (!taxAlerts || taxAlerts.length === 0) {
+                return ''; // No alerts to show
+            }
+            
+            let alertHtml = `
+                <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <h3 style="color: #856404; margin-top: 0; display: flex; align-items: center;">
+                        🚨 Tax Alert Summary
+                    </h3>
+                    <p style="margin: 10px 0;"><strong>${taxAlerts.length} client(s) flagged for customs review</strong></p>
+            `;
+            
+            taxAlerts.forEach(alert => {
+                alertHtml += `
+                    <div style="border-left: 4px solid #ffc107; padding: 15px; margin: 15px 0; background: white; border-radius: 4px;">
+                        <strong style="color: #856404;">${alert.client_name}</strong> 
+                        <span style="color: #6c757d;">(${alert.client_ref})</span>
+                        <ul style="margin: 8px 0; padding-left: 20px;">`;
+                
+                alert.alerts.forEach(item => {
+                    alertHtml += `<li style="margin: 4px 0;"><strong>${item.keyword}</strong> found on page ${item.page}</li>`;
+                });
+                
+                alertHtml += `</ul></div>`;
+            });
+            
+            alertHtml += `</div>`;
+            return alertHtml;
+        }
 
         function showMergerResults(result) {
             const resultsDiv = document.getElementById('merger-results');
             const resultsContent = document.getElementById('merger-results-content');
             
-            resultsContent.innerHTML = `
+            // Add fallback values with debugging
+            const clientCount = result.stats?.merged_clients || 0;
+            
+            // Build the results HTML
+            let resultsHtml = `
                 <h3>✅ Merger Complete!</h3>
-                <p>Successfully merged documents for ${result.stats?.merged_clients || 0} clients</p>
+                <p>Successfully merged documents for ${clientCount} clients</p>
                 <p>All documents include page 9 overlays with container/ship information</p>
                 <a href="${result.downloadUrl}" class="btn btn-success" download>📥 Download Merged Documents</a>
             `;
             
+            // ADD TAX ALERTS HERE
+            if (result.tax_alerts) {
+                resultsHtml += displayTaxAlerts(result.tax_alerts);
+            }
+            
+            resultsContent.innerHTML = resultsHtml;
             resultsDiv.className = 'results success';
             resultsDiv.style.display = 'block';
         }
