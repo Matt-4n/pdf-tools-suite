@@ -129,7 +129,7 @@ class PDFMerger:
                     row = sheet.row_values(row_idx)
                     if len(row) > 11:  # Ensure we have enough columns
                         consignee_name = row[6]  # Column 6: "Consignees Name"
-                        consignee_ref = row[11]  # Column 11: "Consignees Reference"
+                        consignee_ref = row[12]  # Column 12: "Customer Reference" (Column M)
 
                         if consignee_ref and consignee_name:
                             # Clean up the reference format
@@ -352,6 +352,8 @@ class PDFMerger:
         
         try:
             doc = fitz.open(pdf_path)
+            # Track which clients we've already processed from this document
+            processed_clients_in_this_doc = set()
             total_pages = len(doc)
             
             # Process each page to find client references
@@ -383,17 +385,25 @@ class PDFMerger:
 
                         if matched_ref:
                             client_name = self.manifest[matched_ref]
-                            self.logger.info(f"{doc_type}: Found {ref_normalized} -> {matched_ref} - {client_name} on page {page_num + 1}")
-                        
-                        # Store page info for this client
-                        if not self.clients[ref_normalized]['info']:
-                            self.clients[ref_normalized]['info'] = (ref_normalized, client_name)
-                        
-                        self.clients[ref_normalized]['pages'].append({
-                            'page_num': page_num,
-                            'doc_type': doc_type,
-                            'doc_obj': doc
-                        })
+                            
+                            if matched_ref not in processed_clients_in_this_doc:
+                                self.logger.info(f"{doc_type}: Found {ref_normalized} -> {matched_ref} - {client_name} on page {page_num + 1}")
+
+                                # Store page info using EDI reference as key (not normalized reference)
+                                if not self.clients[matched_ref]['info']:
+                                    self.clients[matched_ref]['info'] = (matched_ref, client_name)
+
+                                self.clients[matched_ref]['pages'].append({
+                                    'page_num': page_num,
+                                    'doc_type': doc_type,
+                                    'doc_obj': doc
+                                })
+                                
+                                # Mark this client as processed for this document
+                                processed_clients_in_this_doc.add(matched_ref)
+                            else:
+                                self.logger.debug(f"{doc_type}: Skipping duplicate reference {matched_ref} on page {page_num + 1}")
+
                         break  # Only match once per page
             
             return doc
@@ -608,12 +618,12 @@ class PDFMerger:
             filename_lower = filename.lower()
             
             # 1. Advice of Arrival: "Advice of Arrival ICR1032499.pdf"
-            if filename_lower.startswith('advice of arrival'):
+            if 'advice of arrival' in filename_lower:
                 advice_files.append(pdf_path)
                 self.logger.info(f"   📋 Advice of Arrival: {pdf_path.name}")
             
             # 2. Bill of Lading: "000-534-000_HBL.pdf" (ends with _HBL.pdf)
-            elif filename.endswith('_HBL.pdf'):
+            elif 'HBL' in filename.upper():
                 bill_files.append(pdf_path)
                 self.logger.info(f"   🚢 Bill of Lading (HBL): {pdf_path.name}")
             
