@@ -677,6 +677,7 @@ app.post('/api/merger/process', async (req, res) => {
                 processed_files: mergerResults.stats?.processed_files || mergerResults.processed_files || 0,
                 overlays_applied: mergerResults.overlaysApplied || 0
             },
+            tax_alerts: mergerResults.tax_alerts || [],
             performance: {
                 duration: completedJob.duration,
                 filesPerSecond: (mergerResults.stats?.processed_files || mergerResults.stats?.processed || 0) / (completedJob.duration / 1000)
